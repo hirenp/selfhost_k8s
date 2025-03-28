@@ -267,3 +267,65 @@ Below is a detailed list of all software components installed on the nodes:
   - Handle initial node setup and cluster joining
   - Ensure idempotent operations for reliability
   - Clean up residual files before joining to prevent conflicts
+
+## 10. Monitoring and Dashboard
+
+### 10.1 Kubernetes Dashboard
+
+- Web-based UI for managing Kubernetes cluster
+- Provides visual representation of cluster resources
+- Secured with RBAC and token-based authentication
+- Features include:
+  - Resource monitoring and management
+  - Container logs viewing
+  - Deployment management
+  - Troubleshooting capabilities
+
+### 10.2 Prometheus Monitoring
+
+- Time-series database for metrics collection
+- Components:
+  - **Prometheus Server**: Core component that scrapes and stores metrics
+  - **Alert Manager**: Handles alerts and notifications
+  - **Exporters**: Expose metrics from various systems
+  - **Push Gateway**: Allows ephemeral jobs to expose metrics
+
+### 10.3 Grafana
+
+- Visualization platform for monitoring data
+- Connects to Prometheus as a data source
+- Provides pre-configured dashboards for Kubernetes monitoring:
+  - Node metrics (CPU, memory, disk, network)
+  - Pod and container metrics
+  - Control plane health
+  - Cluster-wide resource utilization
+  
+### 10.4 Installation Process
+
+The monitoring stack is installed after the Kubernetes cluster is fully operational:
+
+1. **Dashboard**: 
+   - Deployed as a set of Kubernetes resources
+   - Creates admin service account with appropriate RBAC permissions
+   - Generates secure access token
+
+2. **Prometheus & Grafana**:
+   - Installed via Helm charts (kube-prometheus-stack)
+   - Set up in dedicated 'monitoring' namespace
+   - Automatically discovers and scrapes Kubernetes components
+
+### 10.5 Access Methods
+
+- **Kubernetes Dashboard**: 
+  - Accessed via kubectl proxy at:
+    `http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/`
+  - Requires token authentication
+
+- **Grafana**: 
+  - Accessed via port-forwarding:
+    `kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80`
+  - Default credentials: admin/admin
+
+- **Prometheus**: 
+  - Accessed via port-forwarding:
+    `kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090`
