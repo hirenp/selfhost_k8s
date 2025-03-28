@@ -1,4 +1,4 @@
-.PHONY: init plan apply destroy setup-kubeconfig install-dashboard install-monitoring dashboard sleep wake status check-hostnames all
+.PHONY: init plan apply destroy setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all sleep wake status check-hostnames all
 
 init:
 	cd terraform && terraform init
@@ -15,14 +15,17 @@ destroy:
 setup-kubeconfig:
 	./scripts/setup_kubeconfig.sh
 
-install-dashboard:
-	./scripts/install_dashboard.sh
+monitoring-dashboard:
+	./scripts/manage_monitoring.sh install-dashboard
 
-install-monitoring:
-	./scripts/install_monitoring.sh
+monitoring-prometheus:
+	./scripts/manage_monitoring.sh install-monitoring
 
-dashboard:
-	./scripts/access_dashboard.sh
+monitoring-all:
+	./scripts/manage_monitoring.sh install-all
+
+monitoring:
+	./scripts/manage_monitoring.sh access
 
 sleep:
 	./scripts/manage_cluster.sh sleep
