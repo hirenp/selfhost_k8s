@@ -1,4 +1,4 @@
-.PHONY: init plan apply destroy setup-kubeconfig
+.PHONY: init plan apply destroy setup-kubeconfig dashboard sleep wake status all
 
 init:
 	cd terraform && terraform init
@@ -14,5 +14,17 @@ destroy:
 
 setup-kubeconfig:
 	./scripts/setup_kubeconfig.sh
+
+dashboard:
+	./scripts/access_dashboard.sh
+
+sleep:
+	./scripts/manage_cluster.sh sleep
+
+wake:
+	./scripts/manage_cluster.sh wake
+
+status:
+	./scripts/manage_cluster.sh status
 
 all: init apply setup-kubeconfig

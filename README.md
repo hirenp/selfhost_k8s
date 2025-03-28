@@ -57,16 +57,52 @@ cd ../scripts
 kubectl get nodes
 ```
 
+6. Access the dashboard and monitoring tools:
+
+```bash
+make dashboard
+```
+
+This will provide you with access information for:
+- Kubernetes Dashboard
+- Grafana monitoring
+- Prometheus metrics
+
 ## Components Used
 
 - **Terraform**: AWS infrastructure provisioning
 - **kubeadm**: Kubernetes cluster bootstrapping
 - **containerd**: Container runtime
 - **Flannel**: Network plugin
+- **Metrics Server**: For resource metrics
+- **Kubernetes Dashboard**: Web UI for cluster management
+- **Helm**: Package manager for Kubernetes
+- **NGINX Ingress Controller**: For routing external traffic
+- **cert-manager**: For SSL/TLS certificate management
+- **Prometheus & Grafana**: For monitoring and visualization
 
-## Cleanup
+## Cost Management
 
-To tear down the infrastructure:
+### Temporary Shutdown (Sleep Mode)
+
+To save costs when not using the cluster (e.g., overnight):
+
+```bash
+# Put the cluster to sleep (scale to zero instances)
+make sleep
+
+# Check the status
+make status
+
+# Wake the cluster up when needed
+make wake
+```
+
+This scales the instances to zero but preserves all infrastructure, making it quick to restart.
+
+### Complete Cleanup
+
+To tear down all infrastructure completely:
 
 ```bash
 cd terraform
