@@ -1,0 +1,25 @@
+# Terraform files
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform/.tfstate
+terraform/.tfstate.backup
+.terraform.lock.hcl
+terraform.tfvars
+terraform.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+crash.log
+
+# MacOS files
+.DS_Store
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*~
+
+# Sensitive files
+secrets/
+.env
