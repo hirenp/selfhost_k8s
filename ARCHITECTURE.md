@@ -1,0 +1,269 @@
+# Kubernetes Cluster Architecture and Setup Process
+
+This document details how our self-hosted Kubernetes cluster on AWS is architected and the process for setting it up using Terraform.
+
+## 1. Infrastructure Overview
+
+The cluster consists of:
+- 2 Control Plane nodes for high availability
+- 3 Worker nodes for running workloads
+- Network Load Balancer for the Kubernetes API
+- Auto Scaling Groups for automatic recovery
+- VPC with security groups for network isolation
+
+## 2. Architecture Diagram
+
+```
+                           ┌─────────────────────────────────────────────────┐
+                           │                    AWS VPC                       │
+                           │                                                 │
+                           │  ┌─────────────────┐    ┌─────────────────┐    │
+┌───────────────┐          │  │                 │    │                 │    │
+│               │          │  │ Auto Scaling Group   │ Auto Scaling Group   │
+│  Client /     │          │  │ ┌─────────────┐ │    │ ┌─────────────┐ │    │
+│  Admin        │──────────┼─▶│ │Control Plane│ │    │ │   Worker    │ │    │
+│  Workstation  │          │  │ │   Node 1    │ │    │ │   Node 1    │ │    │
+│               │          │  │ └─────────────┘ │    │ └─────────────┘ │    │
+└───────────────┘          │  │ ┌─────────────┐ │    │ ┌─────────────┐ │    │
+        │                  │  │ │Control Plane│ │    │ │   Worker    │ │    │
+        │                  │  │ │   Node 2    │ │    │ │   Node 2    │ │    │
+        │                  │  │ └─────────────┘ │    │ └─────────────┘ │    │
+        │                  │  │                 │    │ ┌─────────────┐ │    │
+        │                  │  └─────────────────┘    │ │   Worker    │ │    │
+        │                  │           ▲             │ │   Node 3    │ │    │
+        │                  │           │             │ └─────────────┘ │    │
+        │                  │  ┌────────┴────────┐    └─────────────────┘    │
+        └──────────────────┼─▶│  Network Load   │             ▲              │
+                           │  │    Balancer     │             │              │
+                           │  └────────┬────────┘             │              │
+                           │           │                      │              │
+                           │           └──────────────────────┘              │
+                           │                                                 │
+                           └─────────────────────────────────────────────────┘
+
+```
+
+## 3. Kubernetes Components
+
+### Control Plane Components:
+- **kube-apiserver**: REST API serving as the front-end for Kubernetes control plane
+- **etcd**: Consistent and highly-available key-value store for all cluster data
+- **kube-controller-manager**: Runs controller processes (node controller, replication controller, etc.)
+- **kube-scheduler**: Watches for newly created pods and selects nodes for them to run on
+- **Flannel**: Network overlay providing the pod network
+
+### Worker Components:
+- **kubelet**: Ensures containers are running in a pod
+- **kube-proxy**: Maintains network rules for service communication
+- **Container runtime**: containerd for running containers
+
+## 4. Component Architecture Diagram
+
+```
+┌─ Control Plane Node ────────────────────────────┐  ┌─ Worker Node ─────────────────────┐
+│                                                 │  │                                   │
+│  ┌─ Static Pods ─────────────────────────────┐  │  │  ┌─ Node Components ───────────┐  │
+│  │                                           │  │  │  │                             │  │
+│  │  ┌───────────────┐   ┌──────────────────┐ │  │  │  │                             │  │
+│  │  │ kube-apiserver│   │ kube-scheduler   │ │  │  │  │                             │  │
+│  │  └───────────────┘   └──────────────────┘ │  │  │  │                             │  │
+│  │                                           │  │  │  │                             │  │
+│  │  ┌───────────────┐   ┌──────────────────┐ │  │  │  │      ┌───────────────┐     │  │
+│  │  │ etcd          │   │ controller-      │ │  │  │  │      │ kube-proxy    │     │  │
+│  │  │               │   │ manager          │ │  │  │  │      └───────────────┘     │  │
+│  │  └───────────────┘   └──────────────────┘ │  │  │  │                             │  │
+│  └───────────────────────────────────────────┘  │  │  └─────────────────────────────┘  │
+│                                                 │  │                                   │
+│  ┌─ Node Components ─────────────────────────┐  │  │  ┌─ Container Runtime ──────────┐  │
+│  │                                           │  │  │  │                             │  │
+│  │  ┌───────────────┐   ┌──────────────────┐ │  │  │  │  ┌────────────────┐        │  │
+│  │  │ kubelet       │   │ kube-proxy       │ │  │  │  │  │ containerd     │        │  │
+│  │  └───────────────┘   └──────────────────┘ │  │  │  │  └────────────────┘        │  │
+│  │                                           │  │  │  │                             │  │
+│  └───────────────────────────────────────────┘  │  │  └─────────────────────────────┘  │
+│                                                 │  │                                   │
+│  ┌─ Container Runtime ───────────────────────┐  │  │  ┌─ System Components ──────────┐  │
+│  │                                           │  │  │  │                             │  │
+│  │  ┌───────────────┐   ┌──────────────────┐ │  │  │  │  ┌────────────────┐        │  │
+│  │  │ containerd    │   │ Flannel (CNI)    │ │  │  │  │  │ kubelet        │        │  │
+│  │  └───────────────┘   └──────────────────┘ │  │  │  │  └────────────────┘        │  │
+│  │                                           │  │  │  │                             │  │
+│  └───────────────────────────────────────────┘  │  │  │  ┌────────────────┐        │  │
+│                                                 │  │  │  │ Flannel (CNI)  │        │  │
+└─────────────────────────────────────────────────┘  │  │  └────────────────┘        │  │
+                                                     │  │                             │  │
+                                                     │  └─────────────────────────────┘  │
+                                                     │                                   │
+                                                     └───────────────────────────────────┘
+```
+
+## 5. Setup Process in Detail
+
+### 5.1 Infrastructure Provisioning (Terraform)
+
+1. **VPC and Networking**:
+   - Creates VPC, subnet, internet gateway, and route tables
+   - Sets up security groups for node communication
+   - Provisions a Network Load Balancer for the API server
+
+2. **Auto Scaling Groups**:
+   - Creates separate ASGs for control plane and worker nodes
+   - Enables auto-healing: if a node fails, it's automatically replaced
+   - Uses launch templates with user-data scripts for initialization
+
+### 5.2 Control Plane Node Setup
+
+**Installation Steps**:
+1. Install containerd as the container runtime
+2. Set up CNI plugins for networking
+3. Download Kubernetes components (kubelet, kubeadm, kubectl)
+4. Configure the kubelet systemd service
+5. Prepare for kubeadm initialization
+
+**Initialization Process (First Control Plane)**:
+1. The node with index 1 initializes the cluster:
+   ```bash
+   kubeadm init --control-plane-endpoint="<load-balancer-dns>:6443" \
+     --upload-certs \
+     --pod-network-cidr=10.244.0.0/16
+   ```
+2. This process:
+   - Generates cluster certificates in `/etc/kubernetes/pki/`
+   - Creates kubelet configuration
+   - Starts control plane components as static pods in `/etc/kubernetes/manifests/`
+   - Generates a token and certificate key for other nodes to join
+   - Creates the `/etc/kubernetes/admin.conf` file
+
+3. The Flannel CNI is installed:
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+   ```
+
+**Additional Control Plane Nodes**:
+1. Get the join command from the first control plane
+2. Join with the control-plane flag:
+   ```bash
+   kubeadm join <lb-dns>:6443 --control-plane --certificate-key <key>
+   ```
+3. This sets up additional instances of kube-apiserver, kube-controller-manager, kube-scheduler, and connects to the same etcd cluster
+
+### 5.3 Worker Node Setup
+
+**Installation Steps**:
+1. Same container runtime (containerd) and CNI plugins as control plane
+2. Download kubeadm and kubelet (kubectl not required)
+3. Configure the kubelet systemd service
+
+**Join Process**:
+1. Wait for control plane API to be accessible
+2. Get the join command from a control plane node
+3. Join the cluster:
+   ```bash
+   kubeadm join <lb-dns>:6443 --token <token> --discovery-token-ca-cert-hash <hash>
+   ```
+4. This configures the kubelet to connect to the API server
+5. Node becomes available for workload scheduling
+
+### 5.4 High Availability Design
+
+- **Control Plane Redundancy**: Multiple control plane nodes run the same components
+- **Load Balancer**: Routes API requests to any available control plane node
+- **Auto Scaling Groups**: Automatically replace failed nodes
+- **etcd Cluster**: Distributed across all control plane nodes
+
+### 5.5 Networking
+
+- **Pod Network CIDR**: 10.244.0.0/16 (Flannel default)
+- **Service CIDR**: 10.96.0.0/12 (Kubernetes default)
+- **Node-to-Node Communication**: Enabled through Security Group rules
+- **External Access**: Load Balancer for API, can be extended with Ingress for services
+
+## 6. Maintenance Operations
+
+### 6.1 Sleep/Wake Functionality
+
+The cluster includes scripts to scale down to zero nodes when not in use (sleep) and scale back up when needed (wake), saving costs while preserving all configurations.
+
+### 6.2 Accessing the Cluster
+
+After initialization, the kubeconfig is retrieved from a control plane node and configured to use the load balancer endpoint.
+
+## 7. Installation Components
+
+Below is a detailed list of all software components installed on the nodes:
+
+**Control Plane Nodes**:
+- containerd (container runtime)
+- CNI plugins (container networking)
+- crictl (container runtime interface CLI)
+- kubelet (node agent)
+- kubeadm (cluster bootstrap tool)
+- kubectl (cluster CLI)
+
+**Worker Nodes**:
+- containerd (container runtime)
+- CNI plugins (container networking)
+- crictl (container runtime interface CLI)
+- kubelet (node agent)
+- kubeadm (cluster bootstrap tool)
+
+## 8. File Locations
+
+- **Kubernetes configs**: `/etc/kubernetes/`
+- **Certificates**: `/etc/kubernetes/pki/`
+- **Kubelet config**: `/var/lib/kubelet/config.yaml`
+- **Static pod manifests**: `/etc/kubernetes/manifests/`
+- **Kubeconfig**: `/etc/kubernetes/admin.conf` (on nodes), `~/.kube/config` (on admin workstation)
+
+## 9. Implementation Details
+
+### 9.1 Node Identity and Uniqueness
+
+- **Unique Hostname Generation**: 
+  - Each node generates a unique hostname using its EC2 instance ID
+  - Example: `k8s-control-plane-0390d414` where `0390d414` is part of the EC2 instance ID
+  - This prevents hostname conflicts in auto-scaling environments
+
+- **IMDSv2 Token-based Authentication**:
+  - Secure access to EC2 instance metadata service
+  - Uses token-based authentication instead of IMDSv1
+  - More secure against SSRF (Server Side Request Forgery) attacks
+
+### 9.2 Node-to-Node Communication
+
+- **SSH Key Distribution**:
+  - Each node has both public and private keys
+  - Public key in authorized_keys for incoming connections
+  - Private key for outgoing connections to other nodes
+  - SSH config to disable host checking for internal VPC IPs
+
+### 9.3 High Availability Control Plane
+
+- **Primary Control Plane Selection**:
+  - Deterministic primary selection using IP address sorting
+  - First node (lowest IP address) initializes the cluster
+  - Additional control plane nodes join the existing cluster
+
+- **Certificate Distribution**:
+  - First control plane node uploads certificates to be shared
+  - Additional control plane nodes download certificates during join
+
+### 9.4 Worker Node Joining Logic
+
+- **Multi-stage Join Process**:
+  - Node waits for control plane API to be accessible
+  - Tries to get join command directly from control plane nodes
+  - Falls back to generating join command if needed
+  - Resets any previous Kubernetes state before joining
+
+### 9.5 Persistence and Recovery
+
+- **Auto Scaling Groups**:
+  - Maintain desired capacity of nodes
+  - Replace unhealthy instances automatically
+  - Use launch templates with initialization scripts
+
+- **User Data Scripts**:
+  - Handle initial node setup and cluster joining
+  - Ensure idempotent operations for reliability
+  - Clean up residual files before joining to prevent conflicts

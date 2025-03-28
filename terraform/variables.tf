@@ -52,3 +52,15 @@ variable "public_key_path" {
   type        = string
   default     = "~/.ssh/id_rsa_aws.pub"
 }
+
+variable "private_key_path" {
+  description = "Path to private key for node-to-node communication"
+  type        = string
+  default     = "~/.ssh/id_rsa_aws"
+}
+
+variable "key_name" {
+  description = "Name of the AWS key pair"
+  type        = string
+  default     = "k8s-key"
+}

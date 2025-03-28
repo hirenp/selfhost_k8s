@@ -1,129 +1,133 @@
-# My Self-Hosted Kubernetes Cluster on AWS
+# Self-Hosted Kubernetes on AWS
 
-This is my personal project to set up a self-hosted Kubernetes cluster on AWS EC2 instances using Terraform.
-
-## Key Features
-
-- Auto-healing: Uses AWS Auto Scaling Groups to automatically replace failed nodes
-- High availability: 2 control plane nodes with Network Load Balancer
-- Scalable: 3 worker nodes that can be easily scaled up or down
+This project sets up a self-hosted Kubernetes cluster on AWS using Terraform and basic EC2 instances. The goal is to create a production-grade Kubernetes cluster without using EKS.
 
 ## Architecture
 
+The cluster consists of:
 - 2 control plane nodes for high availability
-- 3 worker nodes 
+- 3 worker nodes
 - Network Load Balancer for the Kubernetes API
-- VPC with a public subnet
-- Security groups for cluster communication
+- Auto Scaling Groups for node management
+
+See the [ARCHITECTURE.md](ARCHITECTURE.md) file for more details.
 
 ## Prerequisites
 
-- AWS CLI configured with my account credentials
-- Terraform installed
-- SSH key pair for accessing the EC2 instances
-- kubectl for interacting with the Kubernetes cluster
+- AWS CLI configured with appropriate credentials
+- Terraform installed (v1.0.0+)
+- SSH key pair for accessing the instances
+- `kubectl` installed locally
 
-## Deployment Steps
+## Setup
 
-1. Initialize Terraform:
+1. Clone this repository
+2. Generate an SSH key pair:
+```bash
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa_aws -N ""
+```
 
+3. Initialize Terraform:
 ```bash
 cd terraform
 terraform init
 ```
 
-2. Before applying, check `variables.tf` to adjust:
-   - Instance types
-   - AWS region
-   - AMI ID
-   - SSH key path
-
-3. Deploy the infrastructure:
-
+4. Apply the Terraform configuration:
 ```bash
 terraform apply
 ```
 
-4. After deployment completes, set up kubeconfig:
-
+5. After the cluster is created, set up your kubeconfig:
 ```bash
 cd ../scripts
 ./setup_kubeconfig.sh
 ```
 
-5. Verify the cluster is running:
-
+6. Test that you can access the cluster:
 ```bash
 kubectl get nodes
 ```
 
-6. Access the dashboard and monitoring tools:
+## Cluster Management
+
+### Sleep/Wake functionality
+
+To save on costs, you can "sleep" the cluster by scaling the EC2 instances to 0, and "wake" it up later:
 
 ```bash
-make dashboard
+./scripts/manage_cluster.sh sleep
+./scripts/manage_cluster.sh wake
 ```
 
-This will provide you with access information for:
-- Kubernetes Dashboard
-- Grafana monitoring
-- Prometheus metrics
+### Accessing the Kubernetes Dashboard
 
-## Components Used
-
-- **Terraform**: AWS infrastructure provisioning
-- **kubeadm**: Kubernetes cluster bootstrapping
-- **containerd**: Container runtime
-- **Flannel**: Network plugin
-- **Metrics Server**: For resource metrics
-- **Kubernetes Dashboard**: Web UI for cluster management
-- **Helm**: Package manager for Kubernetes
-- **NGINX Ingress Controller**: For routing external traffic
-- **cert-manager**: For SSL/TLS certificate management
-- **Prometheus & Grafana**: For monitoring and visualization
-
-## Cost Management
-
-### Temporary Shutdown (Sleep Mode)
-
-To save costs when not using the cluster (e.g., overnight):
+To access the Kubernetes dashboard:
 
 ```bash
-# Put the cluster to sleep (scale to zero instances)
-make sleep
-
-# Check the status
-make status
-
-# Wake the cluster up when needed
-make wake
+./scripts/access_dashboard.sh
 ```
 
-This scales the instances to zero but preserves all infrastructure, making it quick to restart.
+## Troubleshooting
 
-### Complete Cleanup
+### Node Issues
 
-To tear down all infrastructure completely:
+If one of the nodes is having issues:
 
-```bash
-cd terraform
-terraform destroy
-```
+1. Check if the node is running in the AWS console
+2. SSH into the node:
+   ```bash
+   ssh -i ~/.ssh/id_rsa_aws ubuntu@<node-public-ip>
+   ```
+3. Check logs:
+   ```bash
+   sudo journalctl -u kubelet
+   ```
 
-## Troubleshooting Notes
+### Certificate Issues
 
-If nodes fail to join the cluster:
+If you see certificate verification errors:
+   
+1. Re-run the setup_kubeconfig.sh script
+2. Check that the correct CA certificate is being used
 
-1. SSH into the control plane:
-```bash
-ssh -i ~/.ssh/id_rsa ubuntu@<control-plane-ip>
-```
+### Networking Issues
 
-2. Check initialization status:
-```bash
-cat /tmp/kubeadm-init.log
-```
+If pods can't communicate across nodes:
 
-3. Check join command:
-```bash
-cat /tmp/kubeadm-join-command.sh
-```
+1. Check Flannel status:
+   ```bash
+   kubectl -n kube-system get pods | grep flannel
+   ```
+2. Look at CNI configuration:
+   ```bash
+   ssh -i ~/.ssh/id_rsa_aws ubuntu@<node-public-ip> "sudo ls -la /etc/cni/net.d/"
+   ```
+
+## Recent Improvements
+
+The following improvements have been made to ensure reliable cluster operation:
+
+1. **Fixed hostname uniqueness issues:**
+   - Now using EC2 instance IDs in hostnames for guaranteed uniqueness
+   - Proper IMDSv2 token-based authentication for metadata access
+   - Hostnames are explicitly passed to kubelet and kubeadm
+
+2. **Improved SSH connectivity between nodes:**
+   - Added the private key to all nodes for outgoing connections
+   - SSH config to disable host checking for internal IPs
+   - Better file permissions for key files
+
+3. **Enhanced node discovery and joining:**
+   - IP-based sorting to deterministically identify the primary control plane 
+   - Multiple fallback mechanisms for fetching join commands
+   - More resilient to networking issues between nodes
+
+4. **Better error handling and diagnostics:**
+   - Added more verbosity to critical operations
+   - Improved logging of node hostnames and IPs
+   - More robust checking of join command success
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.

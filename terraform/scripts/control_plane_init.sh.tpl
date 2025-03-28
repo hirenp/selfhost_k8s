@@ -83,6 +83,95 @@ if [ "${node_index}" = "1" ]; then
   # Set up Flannel CNI
   kubectl --kubeconfig=/root/.kube/config apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
   
+  # Install Metrics Server
+  kubectl --kubeconfig=/root/.kube/config apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+  
+  # Install CoreDNS if not already installed by kubeadm
+  kubectl --kubeconfig=/root/.kube/config get deployments -n kube-system coredns >/dev/null 2>&1 || \
+    kubectl --kubeconfig=/root/.kube/config apply -f https://raw.githubusercontent.com/coredns/deployment/master/kubernetes/coredns.yaml
+  
+  # Install Kubernetes Dashboard
+  kubectl --kubeconfig=/root/.kube/config apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+  
+  # Create Admin Service Account for Dashboard
+  cat <<EOF | kubectl --kubeconfig=/root/.kube/config apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kubernetes-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kubernetes-dashboard
+EOF
+  
+  # Get the token for the admin user
+  kubectl --kubeconfig=/root/.kube/config -n kubernetes-dashboard create token admin-user > /tmp/dashboard-admin-token.txt
+  
+  # Install Helm
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  
+  # Add important Helm repositories
+  helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  helm repo add jetstack https://charts.jetstack.io
+  helm repo update
+  
+  # Install NGINX Ingress Controller
+  helm install ingress-nginx ingress-nginx/ingress-nginx \
+    --namespace ingress-nginx \
+    --create-namespace \
+    --set controller.service.type=LoadBalancer
+    
+  # Install cert-manager for SSL/TLS certificate management
+  helm install cert-manager jetstack/cert-manager \
+    --namespace cert-manager \
+    --create-namespace \
+    --set installCRDs=true
+    
+  # Install Prometheus for monitoring
+  helm install prometheus prometheus-community/kube-prometheus-stack \
+    --namespace monitoring \
+    --create-namespace \
+    --set grafana.enabled=true \
+    --set alertmanager.enabled=true
+    
+  # Create a Prometheus service monitor for Kubernetes components
+  cat <<EOF | kubectl --kubeconfig=/root/.kube/config apply -f -
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubernetes-components
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  endpoints:
+  - interval: 30s
+    port: https
+    scheme: https
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tlsConfig:
+      insecureSkipVerify: true
+  selector:
+    matchLabels:
+      k8s-app: kube-apiserver
+  namespaceSelector:
+    matchNames:
+      - default
+      - kube-system
+EOF
+  
   # Extract join command for other nodes
   kubeadm token create --print-join-command > /tmp/kubeadm-join-command.sh
   kubeadm init phase upload-certs --upload-certs > /tmp/kubeadm-upload-certs.log

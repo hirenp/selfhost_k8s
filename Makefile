@@ -27,4 +27,6 @@ wake:
 status:
 	./scripts/manage_cluster.sh status
 
+check-hostnames:
+	./scripts/manage_cluster.sh check-hostnames
 all: init apply setup-kubeconfig

@@ -2,6 +2,68 @@ provider "aws" {
   region = var.aws_region
 }
 
+# IAM role for EC2 instances
+resource "aws_iam_role" "k8s_node_role" {
+  name_prefix = "k8s-node-role-"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# IAM policy for EC2 instances to access AWS resources
+resource "aws_iam_policy" "k8s_node_policy" {
+  name_prefix = "k8s-node-policy-"
+  description = "Policy allowing K8s nodes to access AWS resources"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeTags",
+          "autoscaling:DescribeAutoScalingGroups",
+          "autoscaling:DescribeAutoScalingInstances"
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      }
+    ]
+  })
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Attach the policy to the role
+resource "aws_iam_role_policy_attachment" "k8s_node_policy_attachment" {
+  role       = aws_iam_role.k8s_node_role.name
+  policy_arn = aws_iam_policy.k8s_node_policy.arn
+}
+
+# Create an instance profile
+resource "aws_iam_instance_profile" "k8s_node_profile" {
+  name_prefix = "k8s-node-profile-"
+  role        = aws_iam_role.k8s_node_role.name
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # VPC for Kubernetes cluster
 resource "aws_vpc" "k8s_vpc" {
   cidr_block           = var.vpc_cidr
@@ -82,6 +144,14 @@ resource "aws_security_group" "k8s_sg" {
     protocol  = "-1"
     self      = true
   }
+  
+  # Allow all internal traffic within the VPC
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [var.vpc_cidr]
+  }
 
   # Allow all outbound traffic
   egress {
@@ -98,7 +168,7 @@ resource "aws_security_group" "k8s_sg" {
 
 # Key Pair
 resource "aws_key_pair" "k8s_key_pair" {
-  key_name   = "k8s-key-pair"
+  key_name   = var.key_name
   public_key = file(var.public_key_path)
 }
 
@@ -110,6 +180,10 @@ resource "aws_launch_template" "control_plane" {
   key_name      = aws_key_pair.k8s_key_pair.key_name
   
   vpc_security_group_ids = [aws_security_group.k8s_sg.id]
+  
+  iam_instance_profile {
+    name = aws_iam_instance_profile.k8s_node_profile.name
+  }
 
   block_device_mappings {
     device_name = "/dev/sda1"
@@ -129,9 +203,21 @@ resource "aws_launch_template" "control_plane" {
     }
   }
 
-  user_data = base64encode(templatefile("${path.module}/scripts/control_plane_init.sh.tpl", {
-    node_index = "ASG-PLACEHOLDER" # Will be replaced in each instance
-  }))
+  user_data = base64encode(
+    replace(
+      replace(
+        replace(
+          replace(
+            file("${path.module}/user_data_control_plane.sh"),
+            "SSH_KEY_PLACEHOLDER", file(var.public_key_path)
+          ),
+          "PRIVATE_KEY_PLACEHOLDER", file(var.private_key_path)
+        ),
+        "LOAD_BALANCER_DNS_PLACEHOLDER", aws_lb.k8s_api_lb.dns_name
+      ),
+      "AWS_REGION_PLACEHOLDER", var.aws_region
+    )
+  )
 }
 
 # Auto Scaling Group for control plane nodes
@@ -182,6 +268,10 @@ resource "aws_launch_template" "worker" {
   key_name      = aws_key_pair.k8s_key_pair.key_name
   
   vpc_security_group_ids = [aws_security_group.k8s_sg.id]
+  
+  iam_instance_profile {
+    name = aws_iam_instance_profile.k8s_node_profile.name
+  }
 
   block_device_mappings {
     device_name = "/dev/sda1"
@@ -201,9 +291,21 @@ resource "aws_launch_template" "worker" {
     }
   }
 
-  user_data = base64encode(templatefile("${path.module}/scripts/worker_init.sh.tpl", {
-    node_index = "ASG-PLACEHOLDER" # Will be replaced in each instance
-  }))
+  user_data = base64encode(
+    replace(
+      replace(
+        replace(
+          replace(
+            file("${path.module}/user_data_worker.sh"),
+            "SSH_KEY_PLACEHOLDER", file(var.public_key_path)
+          ),
+          "PRIVATE_KEY_PLACEHOLDER", file(var.private_key_path)
+        ),
+        "LOAD_BALANCER_DNS_PLACEHOLDER", aws_lb.k8s_api_lb.dns_name
+      ),
+      "AWS_REGION_PLACEHOLDER", var.aws_region
+    )
+  )
 }
 
 # Auto Scaling Group for worker nodes
@@ -293,4 +395,10 @@ output "control_plane_asg_name" {
 output "worker_asg_name" {
   value = aws_autoscaling_group.worker.name
   description = "Name of the Auto Scaling Group for worker nodes"
+}
+
+# Output the AWS region
+output "aws_region" {
+  value = var.aws_region
+  description = "AWS region where the cluster is deployed"
 }
