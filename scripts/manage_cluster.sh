@@ -1,12 +1,22 @@
 #!/bin/bash
 set -e
 
+# Determine terraform directory
+if [ -d "../terraform" ]; then
+  TERRAFORM_DIR="../terraform"
+elif [ -d "terraform" ]; then
+  TERRAFORM_DIR="terraform"
+else
+  echo "Cannot find terraform directory"
+  exit 1
+fi
+
 # Get AWS region from Terraform
-AWS_REGION=$(terraform -chdir=../terraform output -raw aws_region 2>/dev/null || echo "us-west-1")
+AWS_REGION=$(terraform -chdir=$TERRAFORM_DIR output -raw aws_region 2>/dev/null || echo "us-west-1")
 
 # Get ASG names from Terraform or use defaults
-CONTROL_PLANE_ASG=$(terraform -chdir=../terraform output -raw control_plane_asg_name 2>/dev/null || echo "k8s-control-plane-asg")
-WORKER_ASG=$(terraform -chdir=../terraform output -raw worker_asg_name 2>/dev/null || echo "k8s-worker-asg")
+CONTROL_PLANE_ASG=$(terraform -chdir=$TERRAFORM_DIR output -raw control_plane_asg_name 2>/dev/null || echo "k8s-control-plane-asg")
+WORKER_ASG=$(terraform -chdir=$TERRAFORM_DIR output -raw worker_asg_name 2>/dev/null || echo "k8s-worker-asg")
 
 # Get the action argument
 ACTION=$1
@@ -140,7 +150,7 @@ case "$ACTION" in
       
     # Check load balancer
     echo -e "\nLoad Balancer:"
-    LB_DNS=$(terraform -chdir=../terraform output -raw k8s_api_lb_dns 2>/dev/null || echo "Not found")
+    LB_DNS=$(terraform -chdir=$TERRAFORM_DIR output -raw k8s_api_lb_dns 2>/dev/null || echo "Not found")
     
     if [ "$LB_DNS" = "Not found" ]; then
       echo "API Load Balancer DNS: Not found - cluster may not be deployed yet"

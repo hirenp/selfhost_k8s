@@ -5,11 +5,20 @@ set -e
 # It should be run after terraform apply completes
 
 # Get AWS region from Terraform
-AWS_REGION=$(terraform -chdir=../terraform output -raw aws_region 2>/dev/null || echo "us-west-1")
+if [ -d "../terraform" ]; then
+  TERRAFORM_DIR="../terraform"
+elif [ -d "terraform" ]; then
+  TERRAFORM_DIR="terraform"
+else
+  echo "Cannot find terraform directory"
+  exit 1
+fi
+
+AWS_REGION=$(terraform -chdir=$TERRAFORM_DIR output -raw aws_region 2>/dev/null || echo "us-west-1")
 echo "Using AWS region: $AWS_REGION"
 
 # Get the control plane ASG name
-CONTROL_PLANE_ASG=$(terraform -chdir=../terraform output -raw control_plane_asg_name)
+CONTROL_PLANE_ASG=$(terraform -chdir=$TERRAFORM_DIR output -raw control_plane_asg_name 2>/dev/null || echo "k8s-control-plane-asg")
 echo "Control plane ASG: $CONTROL_PLANE_ASG"
 
 # Get the instance IDs from the ASG
@@ -17,7 +26,7 @@ INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups --region $AWS_REGION
 echo "Found instance IDs: $INSTANCE_IDS"
 
 # Get the load balancer DNS
-LB_DNS=$(terraform -chdir=../terraform output -raw k8s_api_lb_dns)
+LB_DNS=$(terraform -chdir=$TERRAFORM_DIR output -raw k8s_api_lb_dns 2>/dev/null || echo "")
 echo "Load balancer DNS: $LB_DNS"
 
 # Check if any of the control plane nodes are ready and have admin.conf

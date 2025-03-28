@@ -4,15 +4,32 @@ set -e
 # This script helps access the Kubernetes Dashboard and other web UIs
 
 # Get AWS region from Terraform
-AWS_REGION=$(terraform -chdir=../terraform output -raw aws_region 2>/dev/null || echo "us-west-1")
+if [ -d "../terraform" ]; then
+  TERRAFORM_DIR="../terraform"
+elif [ -d "terraform" ]; then
+  TERRAFORM_DIR="terraform"
+else
+  echo "Cannot find terraform directory"
+  exit 1
+fi
+
+AWS_REGION=$(terraform -chdir=$TERRAFORM_DIR output -raw aws_region 2>/dev/null || echo "us-west-1")
 echo "Using AWS region: $AWS_REGION"
 
 # Get the control plane ASG name
-CONTROL_PLANE_ASG=$(terraform -chdir=../terraform output -raw control_plane_asg_name)
+CONTROL_PLANE_ASG=$(terraform -chdir=$TERRAFORM_DIR output -raw control_plane_asg_name 2>/dev/null || echo "k8s-control-plane-asg")
 echo "Control plane ASG: $CONTROL_PLANE_ASG"
 
 # Get the instance IDs from the ASG
 INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups --region $AWS_REGION --auto-scaling-group-names "$CONTROL_PLANE_ASG" --query 'AutoScalingGroups[0].Instances[*].InstanceId' --output text)
+
+# If no instances found through ASG, try direct EC2 query with tag filter
+if [ -z "$INSTANCE_IDS" ]; then
+  echo "No instances found in ASG, trying direct EC2 query..."
+  INSTANCE_IDS=$(aws ec2 describe-instances --region $AWS_REGION \
+    --filters "Name=tag:Role,Values=control-plane" "Name=instance-state-name,Values=running" \
+    --query "Reservations[*].Instances[*].InstanceId" --output text)
+fi
 echo "Found instance IDs: $INSTANCE_IDS"
 
 # Find a control plane node that has the dashboard token
@@ -36,8 +53,18 @@ for INSTANCE_ID in $INSTANCE_IDS; do
     # If Kubernetes is running but token file doesn't exist yet, create it
     if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ~/.ssh/id_rsa_aws ubuntu@$CONTROL_PLANE_IP "sudo [ -d /etc/kubernetes ]" >/dev/null 2>&1; then
       echo "Kubernetes is running on $CONTROL_PLANE_IP. Creating dashboard token..."
-      ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa_aws ubuntu@$CONTROL_PLANE_IP "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kubernetes-dashboard create token admin-user > /tmp/dashboard-admin-token.txt"
-      DASHBOARD_TOKEN=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa_aws ubuntu@$CONTROL_PLANE_IP "sudo cat /tmp/dashboard-admin-token.txt")
+      
+      # Check if dashboard namespace exists
+      DASHBOARD_EXISTS=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa_aws ubuntu@$CONTROL_PLANE_IP "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf get ns kubernetes-dashboard --no-headers 2>/dev/null || echo ''")
+      
+      if [ -z "$DASHBOARD_EXISTS" ]; then
+        echo "Dashboard not installed yet. Please run ./scripts/install_dashboard.sh first"
+        continue
+      fi
+      
+      # Create token and save it
+      ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa_aws ubuntu@$CONTROL_PLANE_IP "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kubernetes-dashboard create token admin-user > /tmp/dashboard-admin-token.txt 2>/dev/null"
+      DASHBOARD_TOKEN=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa_aws ubuntu@$CONTROL_PLANE_IP "sudo cat /tmp/dashboard-admin-token.txt 2>/dev/null")
       
       if [ ! -z "$DASHBOARD_TOKEN" ]; then
         TOKEN_FOUND=true
@@ -49,7 +76,9 @@ done
 
 if [ "$TOKEN_FOUND" = false ]; then
   echo "Error: Could not get dashboard token from any control plane node."
-  echo "Make sure terraform has been applied successfully and Kubernetes Dashboard is installed."
+  echo "The Kubernetes Dashboard might not be installed yet."
+  echo "Please run the following command to install it:"
+  echo "./scripts/install_dashboard.sh"
   exit 1
 fi
 
