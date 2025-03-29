@@ -46,7 +46,7 @@ case "$ACTION" in
     echo "💤 Clusters scaled down. Good night!"
     ;;
     
-  wake)
+  wakeup)
     echo "🌅 Waking up clusters..."
     
     echo "Setting control plane ASG ($CONTROL_PLANE_ASG) to 2 instances"
@@ -284,11 +284,11 @@ $WORKER_INSTANCES"
     ;;
     
   *)
-    echo "❓ Usage: $0 {sleep|wake|status|check-hostnames}"
+    echo "❓ Usage: $0 {sleep|wakeup|status|check-hostnames}"
     echo
     echo "Commands:"
     echo "  sleep           - Scale down all instances (to save costs)"
-    echo "  wake            - Scale up instances to normal levels"
+    echo "  wakeup          - Scale up instances to normal levels"
     echo "  status          - Check current cluster status"
     echo "  check-hostnames - Check for hostname conflicts across instances"
     exit 1
