@@ -43,7 +43,28 @@ case "$ACTION" in
     check_asg_status $CONTROL_PLANE_ASG
     check_asg_status $WORKER_ASG
     
-    echo "💤 Clusters scaled down. Good night!"
+    # Check if ingress-nginx namespace exists and bring down the ingress controller
+    if kubectl get namespace ingress-nginx &>/dev/null; then
+      echo "Bringing down ingress controller to save NLB costs..."
+      
+      # Store the Elastic IP information
+      echo "Storing Elastic IP information..."
+      EIP_ALLOCATION_ID=$(terraform -chdir=$TERRAFORM_DIR output -raw ingress_eip_allocation_id 2>/dev/null || echo "")
+      EIP_PUBLIC_IP=$(terraform -chdir=$TERRAFORM_DIR output -raw ingress_eip_public_ip 2>/dev/null || echo "")
+      
+      echo "EIP_ALLOCATION_ID=$EIP_ALLOCATION_ID" > /tmp/ingress_eip_info.txt
+      echo "EIP_PUBLIC_IP=$EIP_PUBLIC_IP" >> /tmp/ingress_eip_info.txt
+      
+      # Delete the ingress controller (which will remove the NLB)
+      echo "Deleting ingress controller..."
+      kubectl delete namespace ingress-nginx
+      
+      echo "Network Load Balancer will be automatically deleted, but the Elastic IP will be preserved."
+    else
+      echo "Ingress controller not found, skipping."
+    fi
+    
+    echo "💤 Clusters scaled down and NLB removed. Good night!"
     ;;
     
   wakeup)
@@ -52,8 +73,8 @@ case "$ACTION" in
     echo "Setting control plane ASG ($CONTROL_PLANE_ASG) to 2 instances"
     aws autoscaling update-auto-scaling-group --region $AWS_REGION --auto-scaling-group-name $CONTROL_PLANE_ASG --min-size 2 --desired-capacity 2
     
-    echo "Setting worker ASG ($WORKER_ASG) to 3 instances"
-    aws autoscaling update-auto-scaling-group --region $AWS_REGION --auto-scaling-group-name $WORKER_ASG --min-size 3 --desired-capacity 3
+    echo "Setting worker ASG ($WORKER_ASG) to 2 instances"
+    aws autoscaling update-auto-scaling-group --region $AWS_REGION --auto-scaling-group-name $WORKER_ASG --min-size 2 --desired-capacity 2
     
     echo "Waiting for instances to start..."
     sleep 10
@@ -63,6 +84,12 @@ case "$ACTION" in
     echo "🚀 Clusters scaling up. This may take a few minutes."
     echo "The cluster will be fully operational in about 5-10 minutes."
     echo "Run ./scripts/setup_kubeconfig.sh once the instances are running."
+    
+    # Check if we need to reinstall the ingress controller
+    if [ -f "/tmp/ingress_eip_info.txt" ]; then
+      echo "Found stored Elastic IP information. Will reinstall the ingress controller after cluster is ready."
+      echo "Please run ./scripts/install_ingress_controller.sh after the cluster is up to restore the ingress controller with the same Elastic IP."
+    fi
     ;;
     
   status)

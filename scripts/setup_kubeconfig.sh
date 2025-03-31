@@ -79,6 +79,42 @@ if [ "$KUBECONFIG_FOUND" = true ]; then
   echo ""
   echo "Getting nodes..."
   kubectl get nodes
+  
+  # Check if any nodes have GPU features
+  GPU_NODES=$(kubectl get nodes -l GPU=true -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+  if [ ! -z "$GPU_NODES" ]; then
+    echo "Detected GPU nodes: $GPU_NODES"
+    echo "Installing NVIDIA Device Plugin for Kubernetes..."
+    
+    # Install NVIDIA Device Plugin
+    kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.5/nvidia-device-plugin.yml
+    
+    echo "Waiting for NVIDIA device plugin daemonset to be ready..."
+    kubectl -n kube-system rollout status daemonset/nvidia-device-plugin-daemonset 2>/dev/null
+    
+    echo "Verifying GPU nodes..."
+    kubectl get nodes -o=custom-columns=NAME:.metadata.name,GPU:.status.capacity.'nvidia\.com/gpu'
+    
+    echo "To test GPU availability, you can run a sample pod with:"
+    echo "kubectl apply -f - <<EOF"
+    echo "apiVersion: v1"
+    echo "kind: Pod"
+    echo "metadata:"
+    echo "  name: gpu-test"
+    echo "spec:"
+    echo "  restartPolicy: Never"
+    echo "  containers:"
+    echo "    - name: cuda-container"
+    echo "      image: nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda11.6.0"
+    echo "      resources:"
+    echo "        limits:"
+    echo "          nvidia.com/gpu: 1"
+    echo "EOF"
+  else
+    echo "No GPU nodes detected. If you're expecting GPU nodes, they might not be labeled properly."
+    echo "You can check node labels with: kubectl get nodes --show-labels"
+  fi
+  
   echo ""
   echo "Note: To set up kubectl on any control plane node, run the following commands:"
   echo "  mkdir -p \$HOME/.kube"

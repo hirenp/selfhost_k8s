@@ -273,18 +273,40 @@ resource "aws_launch_template" "worker" {
     name = aws_iam_instance_profile.k8s_node_profile.name
   }
 
+  # Configure spot instances if enabled
+  dynamic "instance_market_options" {
+    for_each = var.use_spot_instances ? [1] : []
+    content {
+      market_type = "spot"
+      spot_options {
+        max_price = var.spot_price
+        instance_interruption_behavior = "terminate"
+      }
+    }
+  }
+
   block_device_mappings {
     device_name = "/dev/sda1"
     
     ebs {
-      volume_size = 50
-      volume_type = "gp2"
+      volume_size = 100  # Increased for GPU workloads
+      volume_type = "gp3"
       delete_on_termination = true
     }
   }
 
   tag_specifications {
     resource_type = "instance"
+    
+    tags = {
+      Role = "worker"
+      GPU = "true"
+    }
+  }
+  
+  # Additional tags for the ASG to propagate to instances
+  tag_specifications {
+    resource_type = "volume"
     
     tags = {
       Role = "worker"
@@ -336,6 +358,12 @@ resource "aws_autoscaling_group" "worker" {
   tag {
     key                 = "Name"
     value               = "k8s-worker"
+    propagate_at_launch = true
+  }
+  
+  tag {
+    key                 = "GPU"
+    value               = "true"
     propagate_at_launch = true
   }
 }
@@ -397,8 +425,29 @@ output "worker_asg_name" {
   description = "Name of the Auto Scaling Group for worker nodes"
 }
 
+# Create an Elastic IP for the ingress controller
+resource "aws_eip" "ingress_eip" {
+  domain = "vpc"
+  tags = {
+    Name = "k8s-ingress-eip"
+    ManagedBy = "terraform"
+  }
+  # Removed lifecycle block to allow EIP to be destroyed and recreated
+}
+
 # Output the AWS region
 output "aws_region" {
   value = var.aws_region
   description = "AWS region where the cluster is deployed"
+}
+
+# Output the Elastic IP allocation ID and public IP
+output "ingress_eip_allocation_id" {
+  value = aws_eip.ingress_eip.allocation_id
+  description = "Allocation ID of the Elastic IP for the ingress controller"
+}
+
+output "ingress_eip_public_ip" {
+  value = aws_eip.ingress_eip.public_ip
+  description = "Public IP of the Elastic IP for the ingress controller"
 }

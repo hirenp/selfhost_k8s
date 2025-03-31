@@ -170,6 +170,7 @@ The cluster consists of:
 - **Load Balancer**: Routes API requests to any available control plane node
 - **Auto Scaling Groups**: Automatically replace failed nodes
 - **etcd Cluster**: Distributed across all control plane nodes
+- **Static IP Address**: Elastic IP for consistent access to services even after cluster rebuild
 
 ### 5.5 Networking
 
@@ -182,7 +183,21 @@ The cluster consists of:
 
 ### 6.1 Sleep/Wake Functionality
 
-The cluster includes scripts to scale down to zero nodes when not in use (sleep) and scale back up when needed (wake), saving costs while preserving all configurations.
+The cluster includes scripts to scale down to zero nodes when not in use (sleep) and scale back up when needed (wake), saving costs while preserving all configurations. The implementation:
+
+- Scales EC2 instances down to zero
+- Removes the Network Load Balancer to avoid hourly costs
+- Preserves the Elastic IP allocation for consistent addressing
+- Re-attaches the same Elastic IP when the cluster wakes up
+
+### 6.2 IP Address Persistence
+
+- **Elastic IP Strategy**:
+  - Configured with `prevent_destroy = true` in Terraform
+  - Persists across cluster destroy/create cycles
+  - Ensures services maintain the same public IP address
+  - Simplifies DNS configuration and external access
+  - Costs only $0.005/hour (~$3.60/month) when not attached to a running instance
 
 ### 6.2 Accessing the Cluster
 
@@ -329,3 +344,56 @@ The monitoring stack is installed after the Kubernetes cluster is fully operatio
 - **Prometheus**: 
   - Accessed via port-forwarding:
     `kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090`
+
+## 11. Cost Analysis and Optimization
+
+### 11.1 Cost Components
+
+| Component | Type | Cost (USD) | Notes |
+|-----------|------|------------|-------|
+| Control Plane | On-demand | ~$60/month | 2 x t3.medium nodes, 24/7 operation |
+| Worker Nodes | Spot | ~$114/month | 2 x g4dn.xlarge nodes, 70% spot discount |
+| Network Load Balancer | - | ~$16.43/month | Basic charge |
+| Elastic IP | - | $0 or $3.60/month | Free when attached, $3.60 when idle |
+| EBS Storage | gp3 | ~$30/month | 100GB per node, 4 nodes |
+| Data Transfer | - | Variable | First 1GB free, then $0.09/GB |
+| **Total** | - | **~$220/month** | Full usage without sleep/wake |
+
+### 11.2 Cost Optimization Strategies
+
+- **Sleep/Wake Functionality**:
+  - Scales instances to 0 when not in use
+  - Removes Network Load Balancer during sleep
+  - Preserves Elastic IP allocation
+  - Potential savings: ~$200/month if sleeping 80% of the time
+  
+- **Spot Instance Usage**:
+  - Worker nodes use spot instances for up to 70% cost reduction
+  - Fall back to on-demand only if spot availability is limited
+  
+- **Resource Right-sizing**:
+  - Control plane: t3.medium provides sufficient resources for low-traffic clusters
+  - Worker nodes: g4dn.xlarge balances GPU capability with cost
+  
+- **Storage Optimization**:
+  - gp3 volumes for better price/performance ratio
+  - Ephemeral storage used where possible
+  
+- **Network Cost Management**:
+  - Cluster traffic stays in the same AWS region to minimize transfer costs
+  - Elastic IP reduces DNS and reconfiguration overhead
+
+### 11.3 Cost Monitoring and Governance
+
+- **Tracking**:
+  - AWS Cost Explorer for detailed usage analysis
+  - AWS Budgets for threshold alerts
+  
+- **Tagging Strategy**:
+  - All resources tagged for cost allocation
+  - Separate tags for cluster components, monitoring, and applications
+  
+- **Automated Cost Controls**:
+  - Sleep/wake scripts to enforce cost discipline
+  - Resource quotas to prevent overprovisioning
+  - Horizontal Pod Autoscaler to efficiently use resources

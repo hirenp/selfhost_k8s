@@ -53,11 +53,23 @@ kubectl get nodes
 
 ### Sleep/Wake functionality
 
-To save on costs, you can "sleep" the cluster by scaling the EC2 instances to 0, and "wake" it up later:
+To save on costs, you can "sleep" the cluster by scaling the EC2 instances to 0 and removing the Network Load Balancer, and "wake" it up later:
 
 ```bash
 ./scripts/manage_cluster.sh sleep
-./scripts/manage_cluster.sh wake
+./scripts/manage_cluster.sh wakeup
+```
+
+This implementation:
+- Scales all EC2 instances to 0
+- Removes the Network Load Balancer to avoid its hourly cost
+- Preserves the Elastic IP (EIP) so your public IP address remains static
+- During wake-up, the EIP will be re-attached to the new Network Load Balancer
+
+After waking up the cluster, you'll need to reinstall the ingress controller:
+```bash
+./scripts/setup_kubeconfig.sh
+./scripts/install_ingress_controller.sh
 ```
 
 ### Accessing the Kubernetes Dashboard
@@ -127,6 +139,38 @@ The following improvements have been made to ensure reliable cluster operation:
    - Added more verbosity to critical operations
    - Improved logging of node hostnames and IPs
    - More robust checking of join command success
+
+## Complete Cleanup
+
+To remove the cluster resources:
+
+```bash
+make destroy
+```
+
+**Note about Elastic IP**: The Elastic IP is configured with `prevent_destroy = true` in Terraform to maintain your static IP address across cluster recreations. This allows you to keep the same IP address for your services even if you destroy and rebuild the cluster.
+
+If you want to destroy everything including the Elastic IP:
+
+1. First, remove the EIP from Terraform state:
+   ```bash
+   cd terraform
+   terraform state rm aws_eip.ingress_eip
+   ```
+
+2. Then destroy the remaining resources:
+   ```bash
+   terraform destroy
+   ```
+
+3. Finally, release the EIP manually using the AWS CLI or console:
+   ```bash
+   # Using AWS CLI
+   aws ec2 release-address --allocation-id <allocation-id>
+   
+   # Find the allocation ID if needed
+   aws ec2 describe-addresses --filters "Name=tag:Name,Values=k8s-ingress-eip"
+   ```
 
 ## Contributing
 

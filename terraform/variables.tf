@@ -32,7 +32,7 @@ variable "control_plane_instance_type" {
 variable "worker_instance_type" {
   description = "Instance type for worker nodes"
   type        = string
-  default     = "t3.small" # Recommended 2 vCPU, 2GB RAM for workers
+  default     = "g4dn.xlarge" # NVIDIA T4 GPU instance for inference
 }
 
 variable "control_plane_count" {
@@ -44,8 +44,22 @@ variable "control_plane_count" {
 variable "worker_count" {
   description = "Number of worker nodes"
   type        = number
-  default     = 3
+  default     = 1  # Reduced to 1 for initial testing
 }
+
+variable "use_spot_instances" {
+  description = "Whether to use spot instances for worker nodes"
+  type        = bool
+  default     = false  # Temporarily using on-demand instances
+}
+
+variable "spot_price" {
+  description = "Maximum spot price for worker instances in USD per hour"
+  type        = string
+  default     = "0.38" # ~70% of on-demand price for g4dn.xlarge
+}
+
+# Removed the preserve_eip variable as we're handling the EIP normally now
 
 variable "public_key_path" {
   description = "Path to public key for SSH access"
