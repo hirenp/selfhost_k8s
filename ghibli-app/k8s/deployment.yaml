@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghibli-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ghibli-app
+  template:
+    metadata:
+      labels:
+        app: ghibli-app
+    spec:
+      containers:
+      - name: ghibli-app
+        image: docker.io/hpanchas/ghibli-app:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            cpu: "3"
+            memory: "12Gi"
+            nvidia.com/gpu: 1
+          requests:
+            cpu: "2" 
+            memory: "8Gi"
+            nvidia.com/gpu: 1
+        ports:
+        - containerPort: 5000
+        volumeMounts:
+        - name: uploads
+          mountPath: /app/static/uploads
+      volumes:
+      - name: uploads
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ghibli-app
+  namespace: default
+spec:
+  selector:
+    app: ghibli-app
+  ports:
+  - port: 80
+    targetPort: 5000
+  type: ClusterIP
