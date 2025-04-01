@@ -137,6 +137,33 @@ resource "aws_security_group" "k8s_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # HTTP
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow HTTP"
+  }
+
+  # HTTPS
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow HTTPS"
+  }
+
+  # NodePort HTTP
+  ingress {
+    from_port   = 30000
+    to_port     = 32767
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow Kubernetes NodePort range"
+  }
+
   # Allow all traffic within the security group
   ingress {
     from_port = 0
@@ -433,6 +460,31 @@ resource "aws_eip" "ingress_eip" {
     ManagedBy = "terraform"
   }
   # Removed lifecycle block to allow EIP to be destroyed and recreated
+}
+
+# Automatically associate the Elastic IP with a worker node
+resource "aws_eip_association" "ingress_eip_assoc" {
+  depends_on = [aws_autoscaling_group.worker]
+  allocation_id = aws_eip.ingress_eip.id
+  # Get the instance ID of the first worker node
+  instance_id = data.aws_instances.worker_instances.ids[0]
+}
+
+# Data source to get worker node instances
+data "aws_instances" "worker_instances" {
+  depends_on = [aws_autoscaling_group.worker]
+  
+  filter {
+    name   = "tag:aws:autoscaling:groupName"
+    values = [aws_autoscaling_group.worker.name]
+  }
+  
+  filter {
+    name   = "instance-state-name"
+    values = ["running"]
+  }
+  
+  instance_state_names = ["running"]
 }
 
 # Output the AWS region

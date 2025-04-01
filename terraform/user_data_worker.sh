@@ -289,5 +289,19 @@ EOF
 # Restart containerd one more time
 systemctl restart containerd
 
+# Set up port forwarding for ingress NodePorts
+echo "Setting up port forwarding for ingress NodePorts..."
+# Install iptables-persistent for persistent rules
+apt-get install -y iptables-persistent
+
+# Create port forwarding rules
+# Forward HTTP traffic (port 80 → NodePort range)
+iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 32245
+# Forward HTTPS traffic (port 443 → NodePort range)
+iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 32479
+
+# Save iptables rules to persist across reboots
+netfilter-persistent save
+
 echo "Worker node initialization complete with NVIDIA GPU support!"
 touch /tmp/k8s-worker-init-complete

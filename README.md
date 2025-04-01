@@ -6,9 +6,11 @@ This project sets up a self-hosted Kubernetes cluster on AWS using Terraform and
 
 The cluster consists of:
 - 2 control plane nodes for high availability
-- 3 worker nodes
+- 3 worker nodes with GPU support (g4dn.xlarge instances with NVIDIA T4 GPUs)
 - Network Load Balancer for the Kubernetes API
 - Auto Scaling Groups for node management
+- Automatic port forwarding (80→NodePort, 443→NodePort) for ingress traffic
+- Elastic IP automatically associated with a worker node for stable ingress access
 
 See the [ARCHITECTURE.md](ARCHITECTURE.md) file for more details.
 
@@ -171,6 +173,41 @@ If you want to destroy everything including the Elastic IP:
    # Find the allocation ID if needed
    aws ec2 describe-addresses --filters "Name=tag:Name,Values=k8s-ingress-eip"
    ```
+
+## GPU Support
+
+The cluster supports GPU workloads on worker nodes with GPU instances (g4dn.xlarge). To enable GPU support:
+
+```bash
+make install-gpu-plugin
+```
+
+This will:
+- Install the NVIDIA device plugin with proper host library access
+- Configure Kubernetes to recognize GPUs on worker nodes
+- Run a test pod to verify GPU access is working
+- Enable GPU resource allocation for your workloads
+
+The worker nodes are set up with:
+- Security group rules for HTTP, HTTPS, and NodePort ranges
+- Automatic port forwarding from standard ports (80/443) to NodePorts
+- Elastic IP association for stable access to GPU workloads
+
+To use GPUs in your deployments, add the following resource request to your container spec:
+
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: 1
+```
+
+You can deploy GPU applications using:
+
+```bash
+make deploy-ghibli-app
+```
+
+This will deploy the Ghibli-style image transformation application that uses GPU acceleration and make it accessible at your configured domain.
 
 ## Contributing
 
