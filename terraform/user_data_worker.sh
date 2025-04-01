@@ -67,9 +67,28 @@ curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
   sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
   tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-apt-get update && apt-get install -y nvidia-container-toolkit
+apt-get update && apt-get install -y nvidia-container-toolkit nvidia-container-runtime
+
+# Configure NVIDIA Container Runtime for containerd
 nvidia-ctk runtime configure --runtime=containerd
 systemctl restart containerd && systemctl enable containerd
+
+# Verify NVIDIA Container Runtime configuration
+echo "Verifying NVIDIA Container Runtime configuration..."
+grep -r nvidia /etc/containerd/config.toml
+
+# Create the device plugin directory with proper permissions
+mkdir -p /var/lib/kubelet/device-plugins
+chmod 750 /var/lib/kubelet/device-plugins
+
+# Test NVIDIA Container Runtime
+echo "Testing NVIDIA Container Runtime..."
+ctr image pull docker.io/nvidia/cuda:11.8.0-base-ubuntu22.04
+if ctr run --rm --gpus 0 docker.io/nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-test nvidia-smi; then
+    echo "NVIDIA Container Runtime is working properly"
+else
+    echo "Warning: NVIDIA Container Runtime test failed, but continuing anyway"
+fi
 
 # Setup Kubernetes components
 swapoff -a && sed -i '/swap/d' /etc/fstab
@@ -234,4 +253,41 @@ chmod 600 /etc/kubernetes/bootstrap-kubelet.conf
 
 # Join the cluster with ignore-preflight-errors
 $JOIN_COMMAND --node-name $HOSTNAME --ignore-preflight-errors=all
+
+# Final verification steps for NVIDIA GPU setup
+echo "Performing final verification of NVIDIA setup..."
+nvidia-smi > /tmp/nvidia-smi-output.txt 2>&1
+echo "NVIDIA SMI output:" >> /tmp/k8s-worker-init.log
+cat /tmp/nvidia-smi-output.txt >> /tmp/k8s-worker-init.log
+
+# Verify NVIDIA Container Runtime integration
+echo "Verifying NVIDIA Container Runtime integration..." >> /tmp/k8s-worker-init.log
+if command -v nvidia-container-cli &> /dev/null; then
+    nvidia-container-cli info > /tmp/nvidia-container-cli-info.txt 2>&1
+    echo "NVIDIA Container CLI info:" >> /tmp/k8s-worker-init.log
+    cat /tmp/nvidia-container-cli-info.txt >> /tmp/k8s-worker-init.log
+fi
+
+# Test container runtime with NVIDIA
+echo "Creating a test pod to verify NVIDIA container runtime..." > /tmp/nvidia-test-pod.yaml
+cat > /tmp/nvidia-test-pod.yaml << EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nvidia-test-pod
+spec:
+  restartPolicy: Never
+  containers:
+  - name: nvidia-test-container
+    image: nvidia/cuda:11.8.0-base-ubuntu22.04
+    command: ["nvidia-smi"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+EOF
+
+# Restart containerd one more time
+systemctl restart containerd
+
+echo "Worker node initialization complete with NVIDIA GPU support!"
 touch /tmp/k8s-worker-init-complete

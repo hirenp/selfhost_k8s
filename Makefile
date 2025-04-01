@@ -1,4 +1,4 @@
-.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all install-ingress sleep wakeup status check-hostnames all
+.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all install-ingress install-gpu-plugin sleep wakeup status check-hostnames all
 
 init:
 	cd terraform && terraform init
@@ -32,6 +32,9 @@ monitoring:
 	
 install-ingress:
 	./scripts/install_ingress_controller.sh
+
+install-gpu-plugin:
+	./scripts/install_gpu_plugin.sh
 
 sleep:
 	./scripts/manage_cluster.sh sleep
