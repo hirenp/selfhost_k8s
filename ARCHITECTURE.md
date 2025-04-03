@@ -303,11 +303,90 @@ The Ghibli application uses its own deployment script (`deploy.sh`) to automate 
 
 Using these automation tools significantly reduces operational overhead and ensures consistent deployments across environments.
 
-## 11. Future Enhancements
+## 11. Challenges and Lessons Learned
+
+Throughout the development of this self-hosted Kubernetes cluster, we encountered several significant challenges that provide valuable insights for similar projects.
+
+### 11.1 GPU Support Complexity
+
+Integrating NVIDIA GPUs with Kubernetes proved challenging due to:
+
+- **Version Compatibility**: Finding compatible versions of NVIDIA drivers, CUDA, container runtime, and Kubernetes components was a delicate balancing act
+- **Driver Installation**: The Ubuntu 22.04 installation required specific versions of supporting libraries (libtinfo5, libncurses5) that weren't in default repositories
+- **Container Runtime Configuration**: Configuring containerd with NVIDIA runtime support required careful JSON configuration and runtime class definition
+- **Kernel Module Management**: Ensuring NVIDIA kernel modules loaded properly at boot required additional persistence configuration
+
+**Solution**: We implemented a comprehensive worker node initialization script that:
+1. Installs exact versions of required libraries
+2. Downloads packages from appropriate sources
+3. Configures containerd with proper NVIDIA runtime handlers
+4. Tests for GPU visibility with verification steps
+
+### 11.2 Networking Challenges
+
+The initial Flannel CNI implementation faced several issues:
+
+- **Pod-to-Pod Communication**: Inconsistent connectivity between pods across nodes
+- **DNS Resolution Failures**: CoreDNS pods experienced intermittent connectivity issues
+- **Service Accessibility**: ClusterIP services sometimes unreachable from certain nodes
+- **Network Policy Support**: Limited support for network policies needed for security
+
+**Solution**: Migrating to Calico CNI resolved these issues by providing:
+1. More reliable pod networking with VXLAN encapsulation
+2. Better diagnostic tools for troubleshooting
+3. Robust network policy implementation
+4. Improved performance with optimized data paths
+
+### 11.3 Port Forwarding and Ingress Complexities
+
+Exposing applications externally presented unique challenges:
+
+- **NodePort Limitations**: Default port range (30000-32767) required non-standard URLs
+- **iptables Conflicts**: Calico's iptables rules often conflicted with manual port forwarding
+- **Connection Resets**: TCP connections to port 80 were being reset despite proper forwarding rules
+- **Certificate Management**: TLS certificate handling required special DNS validation setup
+
+**Solution**: We implemented a layered approach:
+1. Custom iptables rules inserted with proper precedence relative to Calico rules
+2. hostPort configuration in the ingress controller deployment
+3. Integration with cert-manager for automated TLS certificate management
+4. Elastic IP association for stable external addressing
+
+### 11.4 Node Identity and Join Process
+
+Kubernetes cluster formation had several failure points:
+
+- **Hostname Uniqueness**: Default EC2 hostname pattern caused duplicate hostnames during scaling
+- **Certificate Distribution**: Secure distribution of cluster certificates to new control plane nodes
+- **Join Command Access**: Worker nodes needed secure access to valid join tokens
+- **Node Recovery**: Rejoining nodes after instance replacement or reboots
+
+**Solution**: Our approach included:
+1. Using EC2 instance IDs in hostnames for guaranteed uniqueness
+2. Implementing kubeadm certificate upload and download process
+3. Creating a multi-stage join process with fallback mechanisms
+4. Distributing SSH keys to allow secure node-to-node communication
+
+### 11.5 Statelessness and Persistence
+
+Maintaining cluster state through scale-down/up cycles was challenging:
+
+- **Configuration Persistence**: Preserving cluster configuration during sleep/wake cycles
+- **Elastic IP Management**: Ensuring consistent IP addressing for external access
+- **Service Reconfiguration**: Reinstalling ingress controllers without changing external endpoints
+- **Credentials Management**: Preserving secrets and credentials across cluster rebuilds
+
+**Solution**: We designed a comprehensive state management approach:
+1. Using persistent EBS volumes for critical data
+2. Creating a "prevent_destroy" configuration for Elastic IPs
+3. Implementing proper node initialization scripts that handle rejoining
+4. Automating the reinstallation of critical components after wakeup
+
+## 12. Future Enhancements
 
 Planned improvements include:
 
-1. **Security**: This is a very basic setup where we've not looked at security/privacy.
+1. **Security**: This is a very basic setup where we've not looked at security/privacy
 2. **Horizontal Pod Autoscaling**: Dynamic scaling based on GPU utilization
 3. **CI/CD Pipeline**: Automated deployment workflow
-4. **Monitoring**: We need to setup focused alerts and also useful metrics, tracing etc.
+4. **Monitoring**: Set up focused alerts and also useful metrics, tracing etc. Also make the existing Observability stack more robust.
