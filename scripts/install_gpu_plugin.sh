@@ -9,6 +9,17 @@ kubectl delete daemonset -n kube-system nvidia-device-plugin-daemonset --ignore-
 kubectl delete daemonset -n kube-system nvidia-device-plugin --ignore-not-found=true
 kubectl delete pod -n default nvidia-runtime-test --ignore-not-found=true
 kubectl delete pod -n default gpu-test --ignore-not-found=true
+kubectl delete runtimeclass nvidia --ignore-not-found=true
+
+# Create NVIDIA RuntimeClass
+echo "Creating NVIDIA RuntimeClass..."
+cat <<EOF | kubectl apply -f -
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+EOF
 
 # Create a final version of the device plugin
 echo "Creating NVIDIA device plugin with proper library configuration..."
@@ -40,7 +51,7 @@ spec:
           - name: nvidia-lib-shared
             mountPath: /nvidia/lib
       containers:
-      - image: nvcr.io/nvidia/k8s-device-plugin:v0.9.0
+      - image: nvcr.io/nvidia/k8s-device-plugin:v0.17.1
         name: nvidia-device-plugin-ctr
         env:
         - name: LD_LIBRARY_PATH
@@ -91,10 +102,11 @@ metadata:
   name: gpu-test
   namespace: default
 spec:
+  runtimeClassName: nvidia
   restartPolicy: OnFailure
   containers:
     - name: cuda-container
-      image: nvidia/cuda:11.8.0-base-ubuntu22.04
+      image: nvidia/cuda:12.1.0-base-ubuntu22.04
       command: ["nvidia-smi"]
       resources:
         limits:
