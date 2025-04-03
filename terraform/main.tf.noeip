@@ -494,14 +494,6 @@ resource "aws_eip" "ingress_eip" {
   }
 }
 
-# Automatically associate the Elastic IP with a worker node
-resource "aws_eip_association" "ingress_eip_assoc" {
-  depends_on = [aws_autoscaling_group.worker]
-  allocation_id = aws_eip.ingress_eip.id
-  # Get the instance ID of the first worker node
-  instance_id = data.aws_instances.worker_instances.ids[0]
-}
-
 # Data source to get worker node instances
 data "aws_instances" "worker_instances" {
   depends_on = [aws_autoscaling_group.worker]

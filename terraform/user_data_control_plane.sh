@@ -112,7 +112,8 @@ mv kubelet /usr/local/bin/
 # Download CNI plugins
 CNI_VERSION="v1.4.0"
 curl -LO "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-${ARCH}-${CNI_VERSION}.tgz"
-mkdir -p /opt/cni/bin
+mkdir -p /opt/cni/bin /etc/cni/net.d
+chmod 755 /opt/cni/bin /etc/cni/net.d
 tar -C /opt/cni/bin -xzf "cni-plugins-linux-${ARCH}-${CNI_VERSION}.tgz"
 rm -f "cni-plugins-linux-${ARCH}-${CNI_VERSION}.tgz"
 
@@ -192,6 +193,7 @@ ExecStart=/usr/local/bin/kubelet \
   --container-runtime-endpoint=unix:///run/containerd/containerd.sock \
   --kubeconfig=/etc/kubernetes/kubelet.conf \
   --hostname-override=${HOSTNAME} \
+  --node-ip=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN_AGAIN" http://169.254.169.254/latest/meta-data/local-ipv4) \
   --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf \
   --fail-swap-on=false
 Restart=always
@@ -248,7 +250,7 @@ if [ "$PRIVATE_IP" = "$FIRST_IP" ]; then
   # Wait for LB to be ready
   sleep 60
   
-  # Initialize the cluster with the load balancer endpoint
+  # Initialize the cluster with the load balancer endpoint for Calico networking
   kubeadm init --control-plane-endpoint="LOAD_BALANCER_DNS_PLACEHOLDER:6443" \
     --upload-certs \
     --pod-network-cidr=10.244.0.0/16 \
@@ -260,7 +262,7 @@ if [ "$PRIVATE_IP" = "$FIRST_IP" ]; then
       echo "Resetting and trying again..."
       kubeadm reset -f
       
-      # Second attempt with more debugging
+      # Second attempt with more debugging - for Calico networking
       echo "Second attempt with more verbose output..."
       kubeadm init --control-plane-endpoint="LOAD_BALANCER_DNS_PLACEHOLDER:6443" \
         --upload-certs \
@@ -280,8 +282,24 @@ if [ "$PRIVATE_IP" = "$FIRST_IP" ]; then
   cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
   chown ubuntu:ubuntu /home/ubuntu/.kube/config
   
-  # Set up Flannel CNI
-  kubectl --kubeconfig=/root/.kube/config apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+  # Install Calico CNI 
+  kubectl --kubeconfig=/root/.kube/config create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/tigera-operator.yaml
+  
+  # Apply Calico configuration
+  kubectl --kubeconfig=/root/.kube/config apply -f - <<EOF
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+    - blockSize: 26
+      cidr: 10.244.0.0/16
+      encapsulation: VXLANCrossSubnet
+      natOutgoing: Enabled
+      nodeSelector: all()
+EOF
   
   # Extract join command for other nodes
   JOIN_CMD=$(kubeadm token create --print-join-command)
