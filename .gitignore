@@ -10,6 +10,7 @@ terraform.tfvars.json
 *.auto.tfvars
 *.auto.tfvars.json
 crash.log
+dashboard-token.txt
 
 # MacOS files
 .DS_Store
