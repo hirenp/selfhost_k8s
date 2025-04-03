@@ -54,23 +54,36 @@ class GhibliStyleTransfer:
             else:
                 logger.error("CUDA is not available. Check NVIDIA drivers and libraries.")
         
-        # We'll download a pre-trained AnimeGANv2 model tailored for Ghibli style
+        # Load the pre-downloaded model
         try:
-            # Load a model that can be used for style transfer
-            # This is a real style transfer model
-            self.model = torch.hub.load('pytorch/vision:v0.10.0', 'deeplabv3_resnet50', pretrained=True)
+            # Try to load the saved model state from the Docker image
+            model_state_path = os.path.join(os.environ.get('TORCH_HOME', '/app/.torch'), 'hub/deeplabv3_resnet50_state.pth')
+            
+            if os.path.exists(model_state_path):
+                logger.info(f"Found pre-downloaded model state at {model_state_path}")
+                # Load the model architecture
+                self.model = torch.hub.load('pytorch/vision', 'deeplabv3_resnet50', pretrained=False)
+                # Load the saved state
+                self.model.load_state_dict(torch.load(model_state_path))
+                logger.info("Loaded model from pre-downloaded state")
+            else:
+                logger.info("Pre-downloaded model state not found, trying to download model from PyTorch Hub...")
+                self.model = torch.hub.load('pytorch/vision', 'deeplabv3_resnet50', pretrained=True)
+                logger.info("Model downloaded from PyTorch Hub")
+            
             self.model.to(self.device)
             self.model.eval()
-            print(f"Model loaded successfully on {self.device}")
-            
-            # Print CUDA memory usage if on GPU
-            if self.device.type == "cuda":
-                logger.info(f"CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
+            logger.info(f"Model loaded successfully on {self.device}")
         except Exception as e:
             logger.error(f"Error loading model: {str(e)}")
             logger.error(traceback.format_exc())  # Print full traceback
-            # Fallback to a simple transformation if model loading fails
+            # Fallback to a GPU transformation if model loading fails
             self.model = None
+            logger.info("Falling back to GPU-accelerated transformation")
+        
+        # Print CUDA usage stats
+        if self.device.type == "cuda":
+            logger.info(f"CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
     
     def preprocess(self, image):
         """Preprocess the image for the model"""
@@ -224,45 +237,119 @@ class GhibliStyleTransfer:
             return self.apply_fallback_transform(image)
     
     def apply_fallback_transform(self, image):
-        """Apply a simple filter as fallback if model inference fails"""
-        # Apply a simplified Ghibli-like filter using PIL
+        """Apply a GPU-accelerated filter as fallback"""
         try:
-            logger.info("Applying fallback transformation")
-            # Convert to numpy for easier manipulation
+            logger.info("Applying GPU-accelerated fallback transformation")
+            
+            # Convert to tensor for GPU processing
             import numpy as np
-            np_image = np.array(image).astype(float)
-            logger.debug(f"Image shape: {np_image.shape}")
+            np_image = np.array(image)
             
-            # Adjust colors to create a Ghibli-like palette
-            # Increase blue for skies
-            np_image[:, :, 2] = np.clip(np_image[:, :, 2] * 1.2, 0, 255)
-            # Enhance greens for nature
-            np_image[:, :, 1] = np.clip(np_image[:, :, 1] * 1.1, 0, 255)
-            # Slightly reduce red
-            np_image[:, :, 0] = np.clip(np_image[:, :, 0] * 0.9, 0, 255)
-            
-            # Add contrast
-            np_image = np.clip((np_image - 128) * 1.2 + 128, 0, 255)
-            
-            # Convert back to PIL
-            logger.debug("Converting back to PIL image")
-            result = Image.fromarray(np_image.astype(np.uint8))
-            
-            # Apply a slight blur to simulate hand-drawn feel
-            from PIL import ImageFilter
-            result = result.filter(ImageFilter.GaussianBlur(radius=0.5))
-            
-            # Enhance brightness
-            from PIL import ImageEnhance
-            enhancer = ImageEnhance.Brightness(result)
-            result = enhancer.enhance(1.1)
-            
-            # Enhance saturation
-            enhancer = ImageEnhance.Color(result)
-            result = enhancer.enhance(1.2)
-            
-            logger.info("Applied fallback Ghibli-style transformation")
-            return result
+            # Check if we're using GPU
+            if self.device.type == "cuda":
+                logger.info("Using GPU for fallback transformation")
+                
+                # Convert to PyTorch tensor and move to GPU
+                img_tensor = torch.from_numpy(np_image).float().permute(2, 0, 1).to(self.device) / 255.0
+                logger.debug(f"Input tensor shape: {img_tensor.shape}")
+                
+                # Apply Ghibli-style color adjustments
+                # Increase blue for skies
+                img_tensor[2] = torch.clamp(img_tensor[2] * 1.3, 0, 1)
+                # Enhance greens for nature
+                img_tensor[1] = torch.clamp(img_tensor[1] * 1.2, 0, 1)
+                # Slightly reduce red
+                img_tensor[0] = torch.clamp(img_tensor[0] * 0.9, 0, 1)
+                
+                # Add contrast
+                img_tensor = torch.clamp((img_tensor - 0.5) * 1.3 + 0.5, 0, 1)
+                
+                # Apply stylized color grading (Ghibli's characteristic pastel tones)
+                # Add a subtle blue/teal tint to shadows
+                shadow_mask = (img_tensor.mean(dim=0) < 0.4).float().unsqueeze(0)
+                img_tensor = img_tensor * (1 - shadow_mask * 0.1) + torch.tensor([0.05, 0.1, 0.15]).view(3, 1, 1).to(self.device) * shadow_mask * 0.1
+                
+                # Add warmth to highlights (characteristic yellow/orange glow)
+                highlight_mask = (img_tensor.mean(dim=0) > 0.7).float().unsqueeze(0)
+                img_tensor = img_tensor * (1 - highlight_mask * 0.1) + torch.tensor([0.15, 0.12, 0.05]).view(3, 1, 1).to(self.device) * highlight_mask * 0.1
+                
+                # Apply a gaussian blur to simulate hand-drawn feel
+                # Create a small gaussian kernel
+                kernel_size = 5
+                sigma = 1.0
+                channels = 3
+                
+                # Create a 1D Gaussian kernel
+                kernel_1d = torch.exp(torch.arange(-(kernel_size // 2), kernel_size // 2 + 1).float().to(self.device) ** 2 / (-2 * sigma ** 2))
+                kernel_1d = kernel_1d / kernel_1d.sum()
+                
+                # Apply separable gaussian blur (faster than 2D convolution)
+                # Horizontal pass
+                padded = torch.nn.functional.pad(img_tensor, (kernel_size // 2, kernel_size // 2, 0, 0), mode='reflect')
+                blurred_h = torch.nn.functional.conv1d(
+                    padded.view(channels, -1, padded.shape[2]),
+                    kernel_1d.view(1, 1, -1).repeat(channels, 1, 1),
+                    groups=channels
+                )
+                
+                # Vertical pass
+                padded = torch.nn.functional.pad(blurred_h.view(channels, img_tensor.shape[1], -1), (0, 0, kernel_size // 2, kernel_size // 2), mode='reflect')
+                blurred = torch.nn.functional.conv1d(
+                    padded.permute(0, 2, 1),
+                    kernel_1d.view(1, 1, -1).repeat(channels, 1, 1),
+                    groups=channels
+                ).permute(0, 2, 1)
+                
+                # Sharpen the image with unsharp mask
+                sharpened = img_tensor + 0.5 * (img_tensor - blurred.view(channels, img_tensor.shape[1], img_tensor.shape[2]))
+                sharpened = torch.clamp(sharpened, 0, 1)
+                
+                # Slightly more saturated colors
+                mean_intensity = sharpened.mean(dim=0, keepdim=True)
+                saturated = sharpened + (sharpened - mean_intensity) * 0.2
+                saturated = torch.clamp(saturated, 0, 1)
+                
+                # Convert back to numpy and then PIL
+                result_np = (saturated.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                result = Image.fromarray(result_np)
+                
+                logger.info("Applied GPU-accelerated Ghibli-style transformation")
+                return result
+                
+            else:
+                # Fallback to CPU processing if no GPU
+                logger.info("Using CPU for fallback transformation")
+                # Convert to numpy for easier manipulation on CPU
+                np_image = np.array(image).astype(float)
+                
+                # Adjust colors to create a Ghibli-like palette
+                # Increase blue for skies
+                np_image[:, :, 2] = np.clip(np_image[:, :, 2] * 1.2, 0, 255)
+                # Enhance greens for nature
+                np_image[:, :, 1] = np.clip(np_image[:, :, 1] * 1.1, 0, 255)
+                # Slightly reduce red
+                np_image[:, :, 0] = np.clip(np_image[:, :, 0] * 0.9, 0, 255)
+                
+                # Add contrast
+                np_image = np.clip((np_image - 128) * 1.2 + 128, 0, 255)
+                
+                # Convert back to PIL
+                result = Image.fromarray(np_image.astype(np.uint8))
+                
+                # Apply a slight blur to simulate hand-drawn feel
+                from PIL import ImageFilter
+                result = result.filter(ImageFilter.GaussianBlur(radius=0.5))
+                
+                # Enhance brightness and saturation
+                from PIL import ImageEnhance
+                enhancer = ImageEnhance.Brightness(result)
+                result = enhancer.enhance(1.1)
+                enhancer = ImageEnhance.Color(result)
+                result = enhancer.enhance(1.2)
+                
+                logger.info("Applied CPU fallback Ghibli-style transformation")
+                return result
+                
         except Exception as e:
             logger.error(f"Error in fallback transform: {str(e)}")
             logger.error(traceback.format_exc())

@@ -13,6 +13,9 @@ spec:
       labels:
         app: ghibli-app
     spec:
+      hostNetwork: true
+      serviceAccountName: ghibli-app-sa
+      runtimeClassName: nvidia
       containers:
       - name: ghibli-app
         image: docker.io/hpanchas/ghibli-app:latest
