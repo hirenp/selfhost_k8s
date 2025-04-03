@@ -1,214 +1,250 @@
-# Self-Hosted Kubernetes on AWS
+# Self-Hosted Kubernetes on AWS (for maximum fun and some pain)
 
-This project sets up a self-hosted Kubernetes cluster on AWS using Terraform and basic EC2 instances. The goal is to create a production-grade Kubernetes cluster without using EKS.
-
-## Architecture
-
-The cluster consists of:
-- 2 control plane nodes for high availability
-- 3 worker nodes with GPU support (g4dn.xlarge instances with NVIDIA T4 GPUs)
-- Network Load Balancer for the Kubernetes API
-- Auto Scaling Groups for node management
-- Automatic port forwarding (80→NodePort, 443→NodePort) for ingress traffic
-- Elastic IP automatically associated with a worker node for stable ingress access
-
-See the [ARCHITECTURE.md](ARCHITECTURE.md) file for more details.
+This project sets up a self-hosted Kubernetes cluster on AWS with GPU support. This README focuses on installation and operations. For architecture details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Prerequisites
 
+Before starting, make sure you have:
+
 - AWS CLI configured with appropriate credentials
 - Terraform installed (v1.0.0+)
-- SSH key pair for accessing the instances
-- `kubectl` installed locally
+- kubectl installed locally
+- An SSH key pair for accessing EC2 instances
 
-## Setup
+## Installation Steps
 
-1. Clone this repository
-2. Generate an SSH key pair:
+### 1. Clone and Initialize
+
 ```bash
+# Clone the repository
+git clone https://github.com/hirenp/selfhost_k8s.git
+cd selfhost_k8s
+
+# Generate SSH key if needed
 ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa_aws -N ""
+
+# Initialize Terraform
+make init
 ```
 
-3. Initialize Terraform:
+**Verification**: You should see "Terraform has been successfully initialized!"
+
+### 2. Deploy Infrastructure
+
 ```bash
-cd terraform
-terraform init
+# Review the plan (optional)
+make plan
+
+# Deploy the infrastructure
+make apply
 ```
 
-4. Apply the Terraform configuration:
+**Verification**: Terraform should show successful resource creation with "Apply complete!" message.
+
+### 3. Set Up Kubernetes Access
+
 ```bash
-terraform apply
+# Configure kubeconfig
+make setup-kubeconfig
 ```
 
-5. After the cluster is created, set up your kubeconfig:
+**Verification**: Confirm cluster access with:
 ```bash
-cd ../scripts
-./setup_kubeconfig.sh
+kubectl get nodes
+```
+You should see your control plane and worker nodes (may take a few minutes to show all nodes as Ready).
+
+### 4. Install NGINX Ingress Controller
+
+```bash
+make install-ingress
 ```
 
-6. Test that you can access the cluster:
+**Verification**: Check that the ingress controller pods are running:
+```bash
+kubectl get pods -n ingress-nginx
+```
+
+### 5. Install NVIDIA GPU Plugin
+
+```bash
+make install-gpu-plugin
+```
+
+**Verification**: Verify GPU support:
+```bash
+kubectl get nodes -o=custom-columns=NAME:.metadata.name,GPU:.status.capacity.'nvidia\.com/gpu'
+```
+Worker nodes should show available GPUs.
+
+### 6. Install Monitoring Stack
+
+```bash
+# Install Dashboard and Prometheus/Grafana
+make monitoring-all
+```
+
+**Verification**: Check that monitoring components are running:
+```bash
+kubectl get pods -n kubernetes-dashboard
+kubectl get pods -n monitoring
+```
+
+### 7. Deploy the Ghibli App
+
+```bash
+# Navigate to the app directory
+cd ghibli-app
+
+# Deploy the application
+./deploy.sh
+```
+
+**Verification**: Check the deployment status:
+```bash
+kubectl get pods | grep ghibli
+kubectl get service ghibli-app
+kubectl get ingress ghibli-app-ingress
+```
+
+The application should be accessible at whatever your domain is. (you'll need to set up DNS records pointing to your Elastic IP).
+
+## Cluster Management
+
+### Check Cluster Status
+
+```bash
+make status
+```
+
+### Sleep Cluster (to save costs)
+
+```bash
+make sleep
+```
+
+**Verification**: Check that instances are scaled down:
+```bash
+aws ec2 describe-instances --filters "Name=tag:Role,Values=control-plane,worker" "Name=instance-state-name,Values=running" --query "Reservations[].Instances[].InstanceId" --output text
+```
+No instances should be returned.
+
+### Wake Up Cluster
+
+```bash
+make wakeup
+```
+
+**Verification**: Wait for nodes to become ready:
 ```bash
 kubectl get nodes
 ```
 
-## Cluster Management
-
-### Sleep/Wake functionality
-
-To save on costs, you can "sleep" the cluster by scaling the EC2 instances to 0 and removing the Network Load Balancer, and "wake" it up later:
-
+After waking up, you'll need to reinstall the ingress controller:
 ```bash
-./scripts/manage_cluster.sh sleep
-./scripts/manage_cluster.sh wakeup
+make setup-kubeconfig
+make install-ingress
 ```
 
-This implementation:
-- Scales all EC2 instances to 0
-- Removes the Network Load Balancer to avoid its hourly cost
-- Preserves the Elastic IP (EIP) so your public IP address remains static
-- During wake-up, the EIP will be re-attached to the new Network Load Balancer
+### Access Monitoring Dashboards
 
-After waking up the cluster, you'll need to reinstall the ingress controller:
 ```bash
-./scripts/setup_kubeconfig.sh
-./scripts/install_ingress_controller.sh
+make monitoring
 ```
 
-### Accessing the Kubernetes Dashboard
+This will display access instructions for Kubernetes Dashboard, Prometheus, and Grafana.
 
-To access the Kubernetes dashboard:
+## Updating and Maintenance
+
+### Update NVIDIA Drivers
+
+To update NVIDIA drivers on worker nodes:
 
 ```bash
-./scripts/access_dashboard.sh
+# SSH into each worker node
+ssh -i ~/.ssh/id_rsa_aws ubuntu@<worker-node-ip>
+
+# Update drivers
+sudo apt update
+sudo apt install --only-upgrade nvidia-driver-535
+```
+
+### Update Kubernetes Components
+
+To update Kubernetes components, modify the version in Terraform variables and apply:
+
+```bash
+# Edit terraform/variables.tf to update k8s_version
+make apply
 ```
 
 ## Troubleshooting
 
 ### Node Issues
 
-If one of the nodes is having issues:
+If you encounter node problems:
 
-1. Check if the node is running in the AWS console
-2. SSH into the node:
-   ```bash
-   ssh -i ~/.ssh/id_rsa_aws ubuntu@<node-public-ip>
-   ```
-3. Check logs:
-   ```bash
-   sudo journalctl -u kubelet
-   ```
+```bash
+# SSH into the problematic node
+ssh -i ~/.ssh/id_rsa_aws ubuntu@<node-ip>
 
-### Certificate Issues
+# Check kubelet logs
+sudo journalctl -u kubelet -n 100
 
-If you see certificate verification errors:
-   
-1. Re-run the setup_kubeconfig.sh script
-2. Check that the correct CA certificate is being used
+# Check containerd status
+sudo systemctl status containerd
+```
 
 ### Networking Issues
 
-If pods can't communicate across nodes:
+For networking problems:
 
-1. Check Flannel status:
-   ```bash
-   kubectl -n kube-system get pods | grep flannel
-   ```
-2. Look at CNI configuration:
-   ```bash
-   ssh -i ~/.ssh/id_rsa_aws ubuntu@<node-public-ip> "sudo ls -la /etc/cni/net.d/"
-   ```
+```bash
+# Check Calico status
+kubectl -n calico-system get pods
 
-## Recent Improvements
+# Verify Calico installation
+kubectl get tigerastatus
 
-The following improvements have been made to ensure reliable cluster operation:
+# Check iptables rules on a worker node
+ssh -i ~/.ssh/id_rsa_aws ubuntu@<worker-ip> "sudo iptables -t nat -L PREROUTING -v"
+```
 
-1. **Fixed hostname uniqueness issues:**
-   - Now using EC2 instance IDs in hostnames for guaranteed uniqueness
-   - Proper IMDSv2 token-based authentication for metadata access
-   - Hostnames are explicitly passed to kubelet and kubeadm
+### GPU Problems
 
-2. **Improved SSH connectivity between nodes:**
-   - Added the private key to all nodes for outgoing connections
-   - SSH config to disable host checking for internal IPs
-   - Better file permissions for key files
+For GPU-related issues:
 
-3. **Enhanced node discovery and joining:**
-   - IP-based sorting to deterministically identify the primary control plane 
-   - Multiple fallback mechanisms for fetching join commands
-   - More resilient to networking issues between nodes
+```bash
+# Check NVIDIA device plugin
+kubectl get pods -n kube-system | grep nvidia
 
-4. **Better error handling and diagnostics:**
-   - Added more verbosity to critical operations
-   - Improved logging of node hostnames and IPs
-   - More robust checking of join command success
+# Verify GPU detection on worker node
+ssh -i ~/.ssh/id_rsa_aws ubuntu@<worker-ip> "nvidia-smi"
+```
 
 ## Complete Cleanup
 
-To remove the cluster resources:
+To remove all resources:
 
 ```bash
 make destroy
 ```
 
-**Note about Elastic IP**: The Elastic IP is configured with `prevent_destroy = true` in Terraform to maintain your static IP address across cluster recreations. This allows you to keep the same IP address for your services even if you destroy and rebuild the cluster.
+**Note about Elastic IP**: The EIP has `prevent_destroy = true` to maintain your static IP. To destroy everything:
 
-If you want to destroy everything including the Elastic IP:
-
-1. First, remove the EIP from Terraform state:
+1. Remove the EIP from Terraform state:
    ```bash
    cd terraform
    terraform state rm aws_eip.ingress_eip
    ```
 
-2. Then destroy the remaining resources:
+2. Destroy remaining resources:
    ```bash
    terraform destroy
    ```
 
-3. Finally, release the EIP manually using the AWS CLI or console:
+3. Release the EIP manually:
    ```bash
-   # Using AWS CLI
-   aws ec2 release-address --allocation-id <allocation-id>
-   
-   # Find the allocation ID if needed
    aws ec2 describe-addresses --filters "Name=tag:Name,Values=k8s-ingress-eip"
+   aws ec2 release-address --allocation-id <allocation-id>
    ```
-
-## GPU Support
-
-The cluster supports GPU workloads on worker nodes with GPU instances (g4dn.xlarge). To enable GPU support:
-
-```bash
-make install-gpu-plugin
-```
-
-This will:
-- Install the NVIDIA device plugin with proper host library access
-- Configure Kubernetes to recognize GPUs on worker nodes
-- Run a test pod to verify GPU access is working
-- Enable GPU resource allocation for your workloads
-
-The worker nodes are set up with:
-- Security group rules for HTTP, HTTPS, and NodePort ranges
-- Automatic port forwarding from standard ports (80/443) to NodePorts
-- Elastic IP association for stable access to GPU workloads
-
-To use GPUs in your deployments, add the following resource request to your container spec:
-
-```yaml
-resources:
-  limits:
-    nvidia.com/gpu: 1
-```
-
-You can deploy GPU applications using:
-
-```bash
-make deploy-ghibli-app
-```
-
-This will deploy the Ghibli-style image transformation application that uses GPU acceleration and make it accessible at your configured domain.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
