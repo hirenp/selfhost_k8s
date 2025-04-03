@@ -13,7 +13,6 @@ spec:
       labels:
         app: ghibli-app
     spec:
-      hostNetwork: true
       serviceAccountName: ghibli-app-sa
       runtimeClassName: nvidia
       containers:
@@ -43,10 +42,18 @@ kind: Service
 metadata:
   name: ghibli-app
   namespace: default
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "instance"
 spec:
+  type: LoadBalancer
+  ports:
+  - name: http
+    port: 80
+    targetPort: 5000
+  - name: https
+    port: 443
+    targetPort: 5000
   selector:
     app: ghibli-app
-  ports:
-  - port: 80
-    targetPort: 5000
-  type: ClusterIP

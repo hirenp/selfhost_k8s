@@ -54,15 +54,17 @@ kubectl get nodes
 ```
 You should see your control plane and worker nodes (may take a few minutes to show all nodes as Ready).
 
-### 4. Install NGINX Ingress Controller
+### 4. Install Networking Components
 
 ```bash
-make install-ingress
+# Install both Ingress Controller and AWS Load Balancer Controller
+make install-networking
 ```
 
-**Verification**: Check that the ingress controller pods are running:
+**Verification**: Check that networking components are running:
 ```bash
 kubectl get pods -n ingress-nginx
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
 ```
 
 ### 5. Install NVIDIA GPU Plugin
@@ -93,21 +95,17 @@ kubectl get pods -n monitoring
 ### 7. Deploy the Ghibli App
 
 ```bash
-# Navigate to the app directory
-cd ghibli-app
-
-# Deploy the application
-./deploy.sh
+# Deploy the application with a single command
+make deploy-ghibli-app
 ```
 
 **Verification**: Check the deployment status:
 ```bash
 kubectl get pods | grep ghibli
 kubectl get service ghibli-app
-kubectl get ingress ghibli-app-ingress
 ```
 
-The application should be accessible at whatever your domain is. (you'll need to set up DNS records pointing to your Elastic IP).
+When the deployment completes, you'll get the AWS Load Balancer DNS name. Update your DNS records to point `ghibli.doandlearn.app` to this name using a CNAME record. The application will be accessible at both `http://ghibli.doandlearn.app` and `https://ghibli.doandlearn.app` after DNS propagation completes.
 
 ## Cluster Management
 
@@ -206,8 +204,14 @@ kubectl -n calico-system get pods
 # Verify Calico installation
 kubectl get tigerastatus
 
-# Check iptables rules on a worker node
-ssh -i ~/.ssh/id_rsa_aws ubuntu@<worker-ip> "sudo iptables -t nat -L PREROUTING -v"
+# Check AWS Load Balancer Controller status
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+
+# Check Load Balancer Service status
+kubectl describe service ghibli-app
+
+# View Load Balancer events
+kubectl get events | grep LoadBalancer
 ```
 
 ### GPU Problems

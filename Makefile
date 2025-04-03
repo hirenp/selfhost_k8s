@@ -1,4 +1,4 @@
-.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all install-ingress install-gpu-plugin sleep wakeup status check-hostnames all
+.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all install-networking install-ingress install-lb-controller install-gpu-plugin deploy-ghibli-app sleep wakeup status check-hostnames all
 
 init:
 	cd terraform && terraform init
@@ -30,11 +30,22 @@ monitoring-all:
 monitoring:
 	./scripts/manage_monitoring.sh access
 	
+# Individual networking components
 install-ingress:
 	./scripts/install_ingress_controller.sh
 
+install-lb-controller:
+	./scripts/install_load_balancer_controller.sh
+
+# Combined networking target
+install-networking: install-ingress install-lb-controller
+	@echo "Network components installed successfully"
+
 install-gpu-plugin:
 	./scripts/install_gpu_plugin.sh
+
+deploy-ghibli-app:
+	cd ghibli-app && ./deploy.sh
 
 sleep:
 	./scripts/manage_cluster.sh sleep

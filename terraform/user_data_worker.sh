@@ -317,24 +317,11 @@ fi
 systemctl daemon-reload
 systemctl start kubelet
 
-# Set up port forwarding for ingress NodePorts - non-interactive installation
+# Install iptables persistent for Calico compatibility
 DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
 
-# Clear any existing port forwarding rules for 80/443
-iptables -t nat -F PREROUTING
-
-# Add new rules at the beginning of the chain
-iptables -t nat -I PREROUTING 1 -p tcp --dport 80 -j REDIRECT --to-port 32245
-iptables -t nat -I PREROUTING 2 -p tcp --dport 443 -j REDIRECT --to-port 32479
-
-# Make sure these rules are handled before any other rules
-iptables -t nat -I PREROUTING 3 -p tcp -j ACCEPT
-
-# Save the rules to persist across reboots
-netfilter-persistent save
-
-# Verify the rules
-iptables -t nat -L PREROUTING -v --line-numbers > /tmp/iptables-verification.log 2>&1
+# Note: We no longer need manual port forwarding rules
+# AWS Load Balancer Controller will handle routing traffic to the appropriate pods
 
 # Verify Calico networking status and wait for it
 echo "Checking for Calico networking readiness..." > /tmp/calico-setup.log
