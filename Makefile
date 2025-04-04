@@ -1,4 +1,4 @@
-.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all install-networking install-ingress install-lb-controller install-gpu-plugin install-cert-manager deploy-ghibli-app enable-tls sleep wakeup status check-hostnames all
+.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all monitoring-start monitoring-stop monitoring-status install-networking install-ingress install-lb-controller install-gpu-plugin install-cert-manager deploy-ghibli-app enable-tls sleep wakeup status check-hostnames all
 
 init:
 	cd terraform && terraform init
@@ -26,9 +26,23 @@ monitoring-prometheus:
 
 monitoring-all:
 	./scripts/manage_monitoring.sh install-all
+	@echo "\n=== Starting port forwarding for monitoring services ==="
+	./scripts/access_dashboard.sh start
 
 monitoring:
 	./scripts/manage_monitoring.sh access
+	
+monitoring-start:
+	@echo "Starting port forwarding for all monitoring services..."
+	./scripts/access_dashboard.sh start
+
+monitoring-stop:
+	@echo "Stopping all monitoring port forwards..."
+	./scripts/access_dashboard.sh stop
+
+monitoring-status:
+	@echo "Checking monitoring port forwarding status..."
+	./scripts/access_dashboard.sh status
 	
 # Individual networking components
 install-ingress:
