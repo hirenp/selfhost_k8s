@@ -105,7 +105,24 @@ kubectl get pods | grep ghibli
 kubectl get service ghibli-app
 ```
 
-When the deployment completes, you'll get the AWS Load Balancer DNS name. Update your DNS records to point `ghibli.doandlearn.app` to this name using a CNAME record. The application will be accessible at both `http://ghibli.doandlearn.app` and `https://ghibli.doandlearn.app` after DNS propagation completes.
+### 8. Set Up TLS with cert-manager
+
+```bash
+# Install cert-manager if not already installed
+make install-cert-manager
+
+# Create a Cloudflare API token with DNS editing permissions and create a secret
+kubectl create secret generic cloudflare-api-token -n cert-manager \
+  --from-literal=api-token=YOUR_CLOUDFLARE_API_TOKEN
+
+# Create the ClusterIssuer for Let's Encrypt
+./scripts/create_cloudflare_issuer.sh YOUR_EMAIL doandlearn.app
+
+# Enable TLS for the application
+make enable-tls
+```
+
+After running `make enable-tls`, you'll get the AWS Load Balancer DNS name for the ingress controller. Create a CNAME record in Cloudflare that points `ghibli.doandlearn.app` to this DNS name. The application will be accessible securely at `https://ghibli.doandlearn.app` after DNS propagation completes.
 
 ## Cluster Management
 
@@ -138,10 +155,11 @@ make wakeup
 kubectl get nodes
 ```
 
-After waking up, you'll need to reinstall the ingress controller:
+After waking up, you'll need to reinstall the networking components and TLS:
 ```bash
 make setup-kubeconfig
-make install-ingress
+make install-networking
+make enable-tls
 ```
 
 ### Access Monitoring Dashboards
@@ -207,12 +225,34 @@ kubectl get tigerastatus
 # Check AWS Load Balancer Controller status
 kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
 
-# Check Load Balancer Service status
-kubectl describe service ghibli-app
+# Check Ingress Controller status
+kubectl get pods -n ingress-nginx
 
-# View Load Balancer events
-kubectl get events | grep LoadBalancer
+# View LoadBalancer services
+kubectl get svc -A -o wide | grep LoadBalancer
+
+# Check TLS certificates status
+kubectl get certificate -A
 ```
+
+### AWS Target Group Registration Issues
+
+If your application can't be accessed through the AWS Load Balancer:
+
+1. Verify that worker nodes are registered with the target groups:
+   ```bash
+   aws elbv2 describe-target-groups --query "TargetGroups[?contains(TargetGroupName, 'ingress')]"
+   ```
+
+2. Check the registration script logs on worker nodes:
+   ```bash
+   ssh -i ~/.ssh/id_rsa_aws ubuntu@<worker-ip> "sudo cat /tmp/register_target_groups.log"
+   ```
+
+3. Manually trigger target registration if needed:
+   ```bash
+   ssh -i ~/.ssh/id_rsa_aws ubuntu@<worker-ip> "sudo /tmp/register_target_groups.sh"
+   ```
 
 ### GPU Problems
 

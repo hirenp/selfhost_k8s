@@ -66,24 +66,62 @@ Calico provides:
 - VXLANCrossSubnet encapsulation for traffic between different subnets
 - NAT for outgoing traffic
 
-### 3.2 Ingress Configuration
+### 3.2 Ingress and Load Balancer Architecture
 
-- **NGINX Ingress Controller**:
-  - Deployed with hostPort:32245 (HTTP) and hostPort:32479 (HTTPS)
-  - Configured as NodePort services for external access
-  - Static Elastic IP associated with a worker node
+#### 3.2.1 AWS Load Balancer Controller
 
-- **Port Forwarding**:
-  - iptables rules configured on worker nodes for port 80→32245 and 443→32479
-  - Rules applied at boot via user_data_worker.sh:
+The AWS Load Balancer Controller manages AWS resources on behalf of Kubernetes:
+
+- **Network Load Balancer (NLB)**:
+  - Created and managed by the AWS Load Balancer Controller
+  - Configured as internet-facing for external access
+  - Routes traffic to worker nodes' NodePorts
+
+- **Target Groups**:
+  - Automatically created for each LoadBalancer service
+  - Configured for instance-type targets
+  - **Important**: Requires manual target registration for custom services
+
+- **Flow of Traffic**:
+  ```
+  Internet → AWS NLB → Worker Node NodePorts → Ingress-NGINX → ClusterIP Services → Application Pods
+  ```
+
+#### 3.2.2 NGINX Ingress Controller
+
+- **Deployment**:
+  - Runs as pods with the nginx-ingress controller image
+  - Configured to use TLS certificates from cert-manager
+  - Handles HTTP/HTTPS routing based on hostname and path
+
+- **Services**:
+  - `ingress-nginx-controller`: NodePort service (internal)
+    - HTTP: NodePort 32245
+    - HTTPS: NodePort 32479
+  - `ingress-nginx-lb`: LoadBalancer service (external)
+    - Maps external ports 80/443 to the NodePorts
+
+- **Target Registration**:
+  - Target groups require manual registration of worker node instances
+  - Automated via the `register_target_groups.sh` script:
     ```bash
-    # Clear existing port forwarding rules for 80/443
-    iptables -t nat -F PREROUTING
-    
-    # Add new rules
-    iptables -t nat -I PREROUTING 1 -p tcp --dport 80 -j REDIRECT --to-port 32245
-    iptables -t nat -I PREROUTING 2 -p tcp --dport 443 -j REDIRECT --to-port 32479
+    # Auto-detects target groups and registers the instance
+    aws elbv2 register-targets --region ${AWS_REGION} \
+      --target-group-arn ${TARGET_GROUP_ARN} \
+      --targets Id=${INSTANCE_ID},Port=${PORT}
     ```
+
+#### 3.2.3 Application Services
+
+- **ClusterIP Services**:
+  - Internal-only Kubernetes services for application pods
+  - No direct exposure to the internet
+  - Accessed only through the Ingress resources
+  
+- **Ingress Resources**:
+  - Define routing rules based on hostnames and paths
+  - Specify TLS certificate requirements
+  - Redirect HTTP to HTTPS for security
 
 ## 4. GPU Infrastructure
 
