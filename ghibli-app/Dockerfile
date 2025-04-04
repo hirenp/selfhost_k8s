@@ -68,5 +68,28 @@ ENV FLASK_ENV=production
 # Expose the port
 EXPOSE 5000
 
-# Run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+# Set up directory for logs
+RUN mkdir -p /app/logs && chmod 777 /app/logs
+
+# Configure Gunicorn for better debugging and error capture
+# - timeout 300: Increase worker timeout to 300 seconds (5 minutes)
+# - workers 1: Use only 1 worker to maximize GPU memory available to each worker
+# - threads 4: Use multithreading for better performance
+# - worker-class gthread: Use threaded worker class
+# - capture-output: Capture stdout/stderr from workers
+# - enable-stdio-inheritance: Pass through stdout/stderr
+# - log-level debug: Show detailed logs
+# - error-logfile: Write errors to file
+# - access-logfile: Log all access requests
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", \
+     "--timeout", "300", \
+     "--workers", "1", \
+     "--threads", "4", \
+     "--worker-class", "gthread", \
+     "--capture-output", \
+     "--enable-stdio-inheritance", \
+     "--log-level", "debug", \
+     "--error-logfile", "/app/logs/gunicorn-error.log", \
+     "--access-logfile", "/app/logs/gunicorn-access.log", \
+     "--log-file", "/app/logs/gunicorn.log", \
+     "app:app"]

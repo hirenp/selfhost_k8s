@@ -1,4 +1,4 @@
-.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all install-networking install-ingress install-lb-controller install-gpu-plugin deploy-ghibli-app sleep wakeup status check-hostnames all
+.PHONY: init plan apply destroy destroy-all setup-kubeconfig monitoring monitoring-dashboard monitoring-prometheus monitoring-all install-networking install-ingress install-lb-controller install-gpu-plugin install-cert-manager deploy-ghibli-app enable-tls sleep wakeup status check-hostnames all
 
 init:
 	cd terraform && terraform init
@@ -44,8 +44,21 @@ install-networking: install-ingress install-lb-controller
 install-gpu-plugin:
 	./scripts/install_gpu_plugin.sh
 
+install-cert-manager:
+	./scripts/install_cert_manager.sh
+
 deploy-ghibli-app:
 	cd ghibli-app && ./deploy.sh
+
+enable-tls:
+	kubectl apply -f ./ghibli-app/k8s/nginx-ingress-class.yaml
+	kubectl apply -f ./ghibli-app/k8s/loadbalancer-service.yaml
+	kubectl apply -f ./ghibli-app/k8s/ingress.yaml
+	@echo "TLS ingress created for ghibli.doandlearn.app"
+	@echo "Check certificate status with: kubectl get certificate ghibli-tls-cert"
+	@echo ""
+	@echo "To access your application, add a CNAME record in Cloudflare DNS:"
+	@echo "ghibli.doandlearn.app → $(shell kubectl get svc -n ingress-nginx ingress-nginx-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
 
 sleep:
 	./scripts/manage_cluster.sh sleep

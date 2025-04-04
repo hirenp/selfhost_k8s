@@ -9,17 +9,32 @@ import os
 import sys
 import traceback
 import logging
+import time
+import gc
+import psutil
 from werkzeug.utils import secure_filename
 
-# Configure logging
+# Configure more aggressive logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('/app/app_debug.log')  # Add file logging to catch issues
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Log startup info
+logger.info("========== APPLICATION STARTING ==========")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"PyTorch version: {torch.__version__}")
+logger.info(f"PIL version: {Image.__version__}")
+logger.info(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+    logger.info(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+logger.info("========================================")
 
 app = Flask(__name__)
 
@@ -87,24 +102,82 @@ class GhibliStyleTransfer:
     
     def preprocess(self, image):
         """Preprocess the image for the model"""
-        # Resize the image to fit model input requirements
-        transform = transforms.Compose([
-            transforms.Resize((512, 512)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        return transform(image).unsqueeze(0).to(self.device)
+        try:
+            logger.debug(f"[PREPROCESS] Input image size: {image.size}, mode: {image.mode}")
+            
+            # For very large images, resize in two steps to avoid memory issues
+            width, height = image.size
+            if width > 2000 or height > 2000:
+                logger.info(f"[PREPROCESS] Large image detected ({width}x{height}), using two-step resize")
+                # Step 1: Resize to intermediate size first
+                intermediate_size = (1024, 1024)
+                image = image.resize(intermediate_size, Image.LANCZOS)
+                logger.debug(f"[PREPROCESS] Intermediate resize to {intermediate_size}")
+            
+            # Step 2: Apply the standard transformation
+            transform = transforms.Compose([
+                transforms.Resize((512, 512)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+            tensor = transform(image).unsqueeze(0).to(self.device)
+            logger.debug(f"[PREPROCESS] Output tensor shape: {tensor.shape}")
+            return tensor
+        except Exception as e:
+            logger.error(f"[PREPROCESS] Error during preprocessing: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Create a fallback tensor if preprocessing fails
+            logger.info("[PREPROCESS] Creating fallback tensor")
+            # Just create a blank normalized tensor with the right shape
+            blank = torch.zeros(1, 3, 512, 512, device=self.device)
+            # Apply normalization to match expected input range
+            mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
+            blank = (blank - mean) / std
+            return blank
     
     def postprocess(self, tensor):
         """Convert output tensor back to PIL Image"""
-        # Denormalize and convert tensor to PIL Image
-        tensor = tensor.squeeze(0).cpu()
-        tensor = tensor * torch.tensor([0.229, 0.224, 0.225]) + torch.tensor([0.485, 0.456, 0.406])
-        tensor = tensor.clamp(0, 1)
-        return transforms.ToPILImage()(tensor)
+        try:
+            # Denormalize and convert tensor to PIL Image
+            logger.debug(f"[POSTPROCESS] Input tensor shape: {tensor.shape}")
+            tensor = tensor.squeeze(0).cpu()
+            logger.debug(f"[POSTPROCESS] After squeeze: {tensor.shape}")
+            
+            # Handle denormalization with proper broadcasting
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
+            
+            if tensor.dim() == 3 and tensor.size(0) == 3:
+                # If tensor is [3, H, W], denormalize
+                logger.debug("[POSTPROCESS] Denormalizing RGB tensor")
+                tensor = tensor * std + mean
+            else:
+                # If tensor has unexpected shape, just rescale to [0,1]
+                logger.warning(f"[POSTPROCESS] Unexpected tensor shape: {tensor.shape}, skipping denormalization")
+                # Make sure it's a proper image format (3 channels)
+                if tensor.dim() != 3 or tensor.size(0) != 3:
+                    logger.warning("[POSTPROCESS] Reshaping tensor to image format")
+                    # If we have a single channel, repeat it to make an RGB image
+                    if tensor.dim() == 2 or (tensor.dim() == 3 and tensor.size(0) == 1):
+                        original = tensor.view(1, tensor.size(-2), tensor.size(-1))
+                        tensor = original.repeat(3, 1, 1)
+            
+            tensor = tensor.clamp(0, 1)
+            logger.debug(f"[POSTPROCESS] Final tensor shape: {tensor.shape}")
+            return transforms.ToPILImage()(tensor)
+        except Exception as e:
+            logger.error(f"[POSTPROCESS] Error: {str(e)}")
+            logger.error(traceback.format_exc())
+            # If postprocessing fails, return a blank image of the same size as input
+            logger.info("[POSTPROCESS] Creating fallback blank image")
+            blank = torch.zeros(3, 512, 512)
+            return transforms.ToPILImage()(blank)
     
     def transform(self, image):
         """Apply Ghibli-style transformation to the image"""
+        start_time = time.time()
+        
         if self.model is None:
             # If model loading failed, apply a simple filter as fallback
             logger.warning("Model not available, using fallback transformation")
@@ -112,53 +185,123 @@ class GhibliStyleTransfer:
         
         try:
             # Log transformation start
-            logger.info(f"Starting transformation for image size: {image.size}")
+            logger.info(f"[TRANSFORM] Starting transformation for image size: {image.size}")
+            logger.info(f"[SYSTEM] Available memory: {psutil.virtual_memory().available / (1024**2):.2f} MB")
+            
+            if self.device.type == "cuda":
+                logger.info(f"[GPU] Initial CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
+                logger.info(f"[GPU] Max memory: {torch.cuda.max_memory_allocated()/1024**2:.2f}MB")
             
             # Convert to RGB if needed
             if image.mode != 'RGB':
-                logger.info(f"Converting image from {image.mode} to RGB")
+                logger.info(f"[TRANSFORM] Converting image from {image.mode} to RGB")
                 image = image.convert('RGB')
             
             # Preprocess the image
+            logger.info(f"[TRANSFORM] Preprocessing image, step timing: {time.time() - start_time:.2f}s")
+            preprocess_start = time.time()
             input_tensor = self.preprocess(image)
-            logger.debug(f"Input tensor shape: {input_tensor.shape}")
+            logger.info(f"[TRANSFORM] Preprocessing complete, took {time.time() - preprocess_start:.2f}s")
+            logger.debug(f"[TENSOR] Input tensor shape: {input_tensor.shape}, dtype: {input_tensor.dtype}")
+            
+            if torch.isnan(input_tensor).any():
+                logger.error("[ERROR] NaN values found in input tensor!")
+            
+            # Report memory before inference
+            if self.device.type == "cuda":
+                logger.info(f"[GPU] Pre-inference CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
             
             # Run inference
+            inference_start = time.time()
             with torch.no_grad():
-                logger.info("Running inference with model")
-                # Get the segmentation mask from DeepLabV3
-                model_output = self.model(input_tensor)
-                logger.debug(f"Model output keys: {model_output.keys()}")
-                output = model_output["out"][0]
-                logger.debug(f"Output tensor shape: {output.shape}")
+                logger.info("[TRANSFORM] Running inference with model")
+                try:
+                    # Get the segmentation mask from DeepLabV3
+                    model_output = self.model(input_tensor)
+                    inference_time = time.time() - inference_start
+                    logger.info(f"[TRANSFORM] Model inference completed in {inference_time:.2f}s")
+                    logger.debug(f"[TENSOR] Model output keys: {model_output.keys()}")
+                    
+                    output = model_output["out"][0]
+                    logger.debug(f"[TENSOR] Output tensor shape: {output.shape}")
+                    
+                    if torch.isnan(output).any():
+                        logger.error("[ERROR] NaN values found in model output!")
+                except RuntimeError as e:
+                    logger.error(f"[ERROR] Runtime error during model inference: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    if "CUDA out of memory" in str(e):
+                        # Try to free memory
+                        if self.device.type == "cuda":
+                            logger.info("[MEMORY] Trying to free CUDA memory")
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            logger.info(f"[GPU] After cleanup: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
+                        raise
                 
                 # Create a Ghibli-style effect using the segmentation and original image
-                logger.info("Applying Ghibli-style effects")
+                style_start = time.time()
+                logger.info("[TRANSFORM] Applying Ghibli-style effects")
+                
+                # Report memory before styling
+                if self.device.type == "cuda":
+                    logger.info(f"[GPU] Pre-styling CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
                 
                 # Get classes with highest probability for each pixel
                 # This creates a clean segmentation map for sky, background, foreground, etc.
-                _, class_map = torch.max(output, dim=0)
-                logger.debug(f"Class map shape: {class_map.shape}, unique classes: {torch.unique(class_map)}")
+                try:
+                    _, class_map = torch.max(output, dim=0)
+                    logger.debug(f"[TENSOR] Class map shape: {class_map.shape}, unique classes: {torch.unique(class_map).tolist()}")
+                except Exception as e:
+                    logger.error(f"[ERROR] Error creating class map: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    raise
                 
                 # Starting with the original image tensor
-                stylized = input_tensor.clone().squeeze(0)
-                logger.debug(f"Stylized tensor shape: {stylized.shape}")
-                
-                # Create masks for different elements based on segmentation classes
-                # Typical classes: 0=background, 1=person, 2=sky, 3=vegetation, etc.
-                # Convert to one-hot encoding for smoother masks
-                num_classes = output.shape[0]
-                masks = []
-                for i in range(num_classes):
-                    mask = (class_map == i).float()
-                    # Apply slight blur to mask for smoother transitions
-                    mask = torch.nn.functional.avg_pool2d(
-                        mask.unsqueeze(0).unsqueeze(0), 
-                        kernel_size=9, 
-                        stride=1, 
-                        padding=4
-                    ).squeeze(0).squeeze(0)
-                    masks.append(mask)
+                try:
+                    stylized = input_tensor.clone().squeeze(0)
+                    logger.debug(f"[TENSOR] Stylized tensor shape: {stylized.shape}")
+                    
+                    if torch.isnan(stylized).any():
+                        logger.error("[ERROR] NaN values found in stylized tensor after clone!")
+                    
+                    # Create masks for different elements based on segmentation classes
+                    # Typical classes: 0=background, 1=person, 2=sky, 3=vegetation, etc.
+                    # Convert to one-hot encoding for smoother masks
+                    mask_start = time.time()
+                    logger.info("[TRANSFORM] Creating segmentation masks")
+                    num_classes = output.shape[0]
+                    masks = []
+                    
+                    for i in range(num_classes):
+                        try:
+                            mask = (class_map == i).float()
+                            # Apply slight blur to mask for smoother transitions
+                            mask = torch.nn.functional.avg_pool2d(
+                                mask.unsqueeze(0).unsqueeze(0), 
+                                kernel_size=9, 
+                                stride=1, 
+                                padding=4
+                            ).squeeze(0).squeeze(0)
+                            
+                            # Check if mask has any active pixels
+                            active_pixels = torch.sum(mask > 0.5).item()
+                            logger.debug(f"[MASK] Class {i}: {active_pixels} active pixels")
+                            
+                            masks.append(mask)
+                        except Exception as e:
+                            logger.error(f"[ERROR] Error creating mask for class {i}: {str(e)}")
+                            logger.error(traceback.format_exc())
+                    
+                    logger.info(f"[TRANSFORM] Created {len(masks)} masks in {time.time() - mask_start:.2f}s")
+                    
+                    # Report memory after mask creation
+                    if self.device.type == "cuda":
+                        logger.info(f"[GPU] Post-mask CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
+                except Exception as e:
+                    logger.error(f"[ERROR] Error in mask creation stage: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    raise
                 
                 # Apply Ghibli-style colors based on segmentation
                 
@@ -198,8 +341,22 @@ class GhibliStyleTransfer:
                 stylized = stylized.clamp(0, 1)
                 
                 # 2. Add a subtle pastel tint characteristic of Ghibli films
-                pastel_tint = torch.tensor([0.02, 0.02, 0.05])  # Slight blue tint
-                stylized = stylized * (1 - 0.15) + pastel_tint.view(3, 1, 1) * 0.15
+                logger.info("[TRANSFORM] Adding pastel tint")
+                try:
+                    # Create tensor on the same device as stylized
+                    pastel_tint = torch.tensor([0.02, 0.02, 0.05], device=stylized.device)  # Slight blue tint
+                    logger.debug(f"[TENSOR] Pastel tint device: {pastel_tint.device}, Stylized device: {stylized.device}")
+                    
+                    # Check shapes before operating
+                    logger.debug(f"[TENSOR] Stylized shape: {stylized.shape}, Pastel tint shape: {pastel_tint.shape}")
+                    
+                    # Explicitly use clone to avoid in-place modification issues
+                    result = stylized.clone() * (1 - 0.15) + pastel_tint.view(3, 1, 1) * 0.15
+                    stylized = result
+                except Exception as tint_error:
+                    logger.error(f"[ERROR] Error applying pastel tint: {str(tint_error)}")
+                    logger.error(traceback.format_exc())
+                    # Continue without tint if error occurs
                 
                 # 3. Smooth details to replicate the hand-drawn feel
                 # Apply a small kernel blur but preserve edges (guided by segmentation)
@@ -223,135 +380,121 @@ class GhibliStyleTransfer:
                     stylized[c] = edge_strength * stylized[c] + (1 - edge_strength) * blurred
                 
                 # Ensure the output is a proper tensor with batch dimension
-                output = stylized.unsqueeze(0)
-                logger.debug(f"Final output tensor shape: {output.shape}")
+                final_start = time.time()
+                logger.info("[TRANSFORM] Preparing final output tensor")
+                
+                try:
+                    # Make sure the tensor has the right shape for an image: [C, H, W]
+                    if stylized.dim() == 3 and stylized.size(0) == 3:
+                        logger.debug(f"[TENSOR] Stylized tensor has correct shape: {stylized.shape}")
+                        output = stylized.unsqueeze(0)  # Add batch dimension: [1, C, H, W]
+                    else:
+                        logger.warning(f"[TENSOR] Stylized tensor has unexpected shape: {stylized.shape}")
+                        # Reshape to standard image format if needed
+                        if stylized.dim() == 2:
+                            # Single channel image, convert to RGB by repeating
+                            logger.info("[TRANSFORM] Converting single channel to RGB")
+                            stylized = stylized.unsqueeze(0).repeat(3, 1, 1)
+                        elif stylized.dim() > 3:
+                            # Too many dimensions, flatten extra ones
+                            logger.info("[TRANSFORM] Flattening extra dimensions")
+                            stylized = stylized.view(3, 512, 512)
+                        output = stylized.unsqueeze(0)
+                    
+                    logger.debug(f"[TENSOR] Final output tensor shape: {output.shape}")
+                    
+                    # Check for NaN values in final tensor
+                    if torch.isnan(output).any():
+                        logger.error("[ERROR] NaN values found in final output tensor!")
+                        # Try to fix NaNs by replacing with zeros
+                        output = torch.nan_to_num(output, nan=0.0)
+                        logger.info("[RECOVERY] Replaced NaN values with zeros")
+                    
+                    # Report final GPU memory usage
+                    if self.device.type == "cuda":
+                        logger.info(f"[GPU] Final CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
+                        logger.info(f"[GPU] Max memory allocated: {torch.cuda.max_memory_allocated()/1024**2:.2f}MB")
+                except Exception as shape_error:
+                    logger.error(f"[ERROR] Error preparing output tensor: {str(shape_error)}")
+                    logger.error(traceback.format_exc())
+                    # Create a new tensor with the right shape
+                    logger.info("[TRANSFORM] Creating blank tensor with correct shape")
+                    output = torch.zeros(1, 3, 512, 512, device=self.device)
+                    # Copy some content if possible
+                    try:
+                        if stylized is not None:
+                            # Try to preserve some of the image data
+                            logger.info("[TRANSFORM] Attempting to preserve image data")
+                            for c in range(min(3, stylized.size(0))):
+                                output[0, c] = stylized[c] if c < stylized.size(0) else 0
+                    except Exception:
+                        pass  # Silently continue with blank tensor
             
             # Postprocess the output
-            logger.info("Postprocessing output to image")
-            result = self.postprocess(output)
-            logger.info(f"Transformation complete, result size: {result.size}")
-            return result
+            logger.info("[TRANSFORM] Postprocessing output to image")
+            try:
+                result = self.postprocess(output)
+                total_time = time.time() - start_time
+                logger.info(f"[TRANSFORM] Transformation complete in {total_time:.2f}s, result size: {result.size}")
+                return result
+            except Exception as e:
+                logger.error(f"[ERROR] Error during postprocessing: {str(e)}")
+                logger.error(traceback.format_exc())
+                # Try to recover by returning original image
+                logger.info("[RECOVERY] Returning original image due to postprocessing error")
+                return image
         except Exception as e:
             logger.error(f"Error during transformation: {str(e)}")
             logger.error(traceback.format_exc())
             return self.apply_fallback_transform(image)
     
     def apply_fallback_transform(self, image):
-        """Apply a GPU-accelerated filter as fallback"""
+        """Apply a simplified filter as fallback"""
         try:
-            logger.info("Applying GPU-accelerated fallback transformation")
+            logger.info("[FALLBACK] Applying simplified Ghibli-style transformation")
             
-            # Convert to tensor for GPU processing
-            import numpy as np
-            np_image = np.array(image)
+            # Convert to PIL image to use PIL transformations (more reliable than tensor ops)
+            from PIL import ImageEnhance, ImageFilter
             
-            # Check if we're using GPU
-            if self.device.type == "cuda":
-                logger.info("Using GPU for fallback transformation")
-                
-                # Convert to PyTorch tensor and move to GPU
-                img_tensor = torch.from_numpy(np_image).float().permute(2, 0, 1).to(self.device) / 255.0
-                logger.debug(f"Input tensor shape: {img_tensor.shape}")
-                
-                # Apply Ghibli-style color adjustments
-                # Increase blue for skies
-                img_tensor[2] = torch.clamp(img_tensor[2] * 1.3, 0, 1)
-                # Enhance greens for nature
-                img_tensor[1] = torch.clamp(img_tensor[1] * 1.2, 0, 1)
-                # Slightly reduce red
-                img_tensor[0] = torch.clamp(img_tensor[0] * 0.9, 0, 1)
-                
-                # Add contrast
-                img_tensor = torch.clamp((img_tensor - 0.5) * 1.3 + 0.5, 0, 1)
-                
-                # Apply stylized color grading (Ghibli's characteristic pastel tones)
-                # Add a subtle blue/teal tint to shadows
-                shadow_mask = (img_tensor.mean(dim=0) < 0.4).float().unsqueeze(0)
-                img_tensor = img_tensor * (1 - shadow_mask * 0.1) + torch.tensor([0.05, 0.1, 0.15]).view(3, 1, 1).to(self.device) * shadow_mask * 0.1
-                
-                # Add warmth to highlights (characteristic yellow/orange glow)
-                highlight_mask = (img_tensor.mean(dim=0) > 0.7).float().unsqueeze(0)
-                img_tensor = img_tensor * (1 - highlight_mask * 0.1) + torch.tensor([0.15, 0.12, 0.05]).view(3, 1, 1).to(self.device) * highlight_mask * 0.1
-                
-                # Apply a gaussian blur to simulate hand-drawn feel
-                # Create a small gaussian kernel
-                kernel_size = 5
-                sigma = 1.0
-                channels = 3
-                
-                # Create a 1D Gaussian kernel
-                kernel_1d = torch.exp(torch.arange(-(kernel_size // 2), kernel_size // 2 + 1).float().to(self.device) ** 2 / (-2 * sigma ** 2))
-                kernel_1d = kernel_1d / kernel_1d.sum()
-                
-                # Apply separable gaussian blur (faster than 2D convolution)
-                # Horizontal pass
-                padded = torch.nn.functional.pad(img_tensor, (kernel_size // 2, kernel_size // 2, 0, 0), mode='reflect')
-                blurred_h = torch.nn.functional.conv1d(
-                    padded.view(channels, -1, padded.shape[2]),
-                    kernel_1d.view(1, 1, -1).repeat(channels, 1, 1),
-                    groups=channels
-                )
-                
-                # Vertical pass
-                padded = torch.nn.functional.pad(blurred_h.view(channels, img_tensor.shape[1], -1), (0, 0, kernel_size // 2, kernel_size // 2), mode='reflect')
-                blurred = torch.nn.functional.conv1d(
-                    padded.permute(0, 2, 1),
-                    kernel_1d.view(1, 1, -1).repeat(channels, 1, 1),
-                    groups=channels
-                ).permute(0, 2, 1)
-                
-                # Sharpen the image with unsharp mask
-                sharpened = img_tensor + 0.5 * (img_tensor - blurred.view(channels, img_tensor.shape[1], img_tensor.shape[2]))
-                sharpened = torch.clamp(sharpened, 0, 1)
-                
-                # Slightly more saturated colors
-                mean_intensity = sharpened.mean(dim=0, keepdim=True)
-                saturated = sharpened + (sharpened - mean_intensity) * 0.2
-                saturated = torch.clamp(saturated, 0, 1)
-                
-                # Convert back to numpy and then PIL
-                result_np = (saturated.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                result = Image.fromarray(result_np)
-                
-                logger.info("Applied GPU-accelerated Ghibli-style transformation")
-                return result
-                
-            else:
-                # Fallback to CPU processing if no GPU
-                logger.info("Using CPU for fallback transformation")
-                # Convert to numpy for easier manipulation on CPU
-                np_image = np.array(image).astype(float)
-                
-                # Adjust colors to create a Ghibli-like palette
-                # Increase blue for skies
-                np_image[:, :, 2] = np.clip(np_image[:, :, 2] * 1.2, 0, 255)
-                # Enhance greens for nature
-                np_image[:, :, 1] = np.clip(np_image[:, :, 1] * 1.1, 0, 255)
-                # Slightly reduce red
-                np_image[:, :, 0] = np.clip(np_image[:, :, 0] * 0.9, 0, 255)
-                
-                # Add contrast
-                np_image = np.clip((np_image - 128) * 1.2 + 128, 0, 255)
-                
-                # Convert back to PIL
-                result = Image.fromarray(np_image.astype(np.uint8))
-                
-                # Apply a slight blur to simulate hand-drawn feel
-                from PIL import ImageFilter
+            result = image.copy()
+            
+            # Apply a series of simple PIL transformations to get a Ghibli look
+            try:
+                # 1. Slightly blur to simulate hand-drawn feel
+                logger.info("[FALLBACK] Applying blur effect")
                 result = result.filter(ImageFilter.GaussianBlur(radius=0.5))
                 
-                # Enhance brightness and saturation
-                from PIL import ImageEnhance
-                enhancer = ImageEnhance.Brightness(result)
-                result = enhancer.enhance(1.1)
+                # 2. Enhance color saturation
+                logger.info("[FALLBACK] Enhancing color")
                 enhancer = ImageEnhance.Color(result)
-                result = enhancer.enhance(1.2)
+                result = enhancer.enhance(1.3)  # Ghibli's vibrant colors
                 
-                logger.info("Applied CPU fallback Ghibli-style transformation")
+                # 3. Enhance contrast
+                logger.info("[FALLBACK] Enhancing contrast")
+                enhancer = ImageEnhance.Contrast(result)
+                result = enhancer.enhance(1.2)  # Ghibli's high contrast
+                
+                # 4. Slightly brighten
+                logger.info("[FALLBACK] Adjusting brightness")
+                enhancer = ImageEnhance.Brightness(result)
+                result = enhancer.enhance(1.05)  # Ghibli's bright palette
+                
+                # 5. Sharpen slightly to recover details
+                logger.info("[FALLBACK] Sharpening")
+                enhancer = ImageEnhance.Sharpness(result)
+                result = enhancer.enhance(1.1)  # Ghibli's detailed look
+                
+                logger.info("[FALLBACK] Successfully applied simplified Ghibli style")
                 return result
                 
+            except Exception as inner_e:
+                logger.error(f"[FALLBACK] Error in PIL processing: {str(inner_e)}")
+                logger.error(traceback.format_exc())
+                # Return original if PIL enhancement fails
+                return image
+                
         except Exception as e:
-            logger.error(f"Error in fallback transform: {str(e)}")
+            logger.error(f"[FALLBACK] Critical error: {str(e)}")
             logger.error(traceback.format_exc())
             # If all else fails, return original
             return image
@@ -372,52 +515,208 @@ def allowed_file(filename):
 def index():
     return render_template('index.html')
 
+# Add a global request counter for debugging
+request_counter = 0
+
+# Add a basic health check endpoint to test if app is running
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok", "message": "Application is running"}), 200
+
 @app.route('/transform', methods=['POST'])
 def transform_image():
+    # Super early logging to catch any request issues
+    global request_counter
+    request_counter += 1
+    
+    # Log immediately to both stdout and file
+    early_log_msg = f"TRANSFORM REQUEST #{request_counter} RECEIVED AT {time.time()}"
+    print(early_log_msg, flush=True)
+    with open('/app/early_requests.log', 'a') as f:
+        f.write(f"{early_log_msg}\n")
+    
+    # Standard request tracking
+    request_start_time = time.time()
+    request_id = f"req_{int(request_start_time * 1000) % 10000}"
+    
+    # Log request details including headers and content type
+    logger.info(f"[REQUEST:{request_id}] ===== NEW TRANSFORMATION REQUEST =====")
+    logger.info(f"[REQUEST:{request_id}] Request #{request_counter}")
+    
+    # Log request details
     try:
-        logger.info("Received transformation request")
+        logger.info(f"[REQUEST:{request_id}] Content-Type: {request.content_type}")
+        logger.info(f"[REQUEST:{request_id}] Content-Length: {request.content_length}")
+        logger.info(f"[REQUEST:{request_id}] Form keys: {list(request.form.keys())}")
+        logger.info(f"[REQUEST:{request_id}] Files keys: {list(request.files.keys())}")
+    except Exception as req_error:
+        logger.error(f"[REQUEST:{request_id}] Error getting request details: {str(req_error)}")
+    
+    try:
+        logger.info(f"[REQUEST:{request_id}] Starting transformation processing")
+        
+        # System status at request start
+        sys_memory = psutil.virtual_memory()
+        logger.info(f"[SYSTEM:{request_id}] Memory: {sys_memory.percent}% used, {sys_memory.available/(1024**2):.2f}MB available")
+        
+        if torch.cuda.is_available():
+            logger.info(f"[GPU:{request_id}] CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
+            torch.cuda.empty_cache()
+            logger.info(f"[GPU:{request_id}] After cache clear: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated")
+        
         if 'file' not in request.files:
-            logger.warning("No file part in request")
+            logger.warning(f"[REQUEST:{request_id}] No file part in request")
             return jsonify({'error': 'No file part'}), 400
         
         file = request.files['file']
         
         if file.filename == '':
-            logger.warning("Empty filename submitted")
+            logger.warning(f"[REQUEST:{request_id}] Empty filename submitted")
             return jsonify({'error': 'No selected file'}), 400
         
         if file and allowed_file(file.filename):
             # Save original image
             filename = secure_filename(file.filename)
             base_filename, ext = os.path.splitext(filename)
-            logger.info(f"Processing file: {filename}")
+            logger.info(f"[REQUEST:{request_id}] Processing file: {filename}")
             
-            original_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{base_filename}_original{ext}")
+            # Add request ID to filename to avoid collisions
+            safe_base = f"{base_filename}_{request_id}"
+            original_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{safe_base}_original{ext}")
             file.save(original_path)
-            logger.info(f"Original image saved to: {original_path}")
+            logger.info(f"[REQUEST:{request_id}] Original image saved to: {original_path}")
             
             # Transform image
             try:
-                image = Image.open(original_path)
-                logger.info(f"Original image size: {image.size}, mode: {image.mode}")
+                # Log file info
+                file_size = os.path.getsize(original_path) / (1024 * 1024)  # Size in MB
+                logger.info(f"[REQUEST:{request_id}] File size: {file_size:.2f}MB")
                 
-                transformed_image = ghibli_transform(image)
-                logger.info(f"Transformation complete, result size: {transformed_image.size}")
+                # Open the image with detailed logging
+                try:
+                    logger.info(f"[REQUEST:{request_id}] Attempting to open image: {original_path}")
+                    image = Image.open(original_path)
+                    logger.info(f"[REQUEST:{request_id}] Successfully opened image")
+                    # Log detailed image properties
+                    width, height = image.size
+                    logger.info(f"[REQUEST:{request_id}] Image properties: size={width}x{height}, mode={image.mode}, format={image.format}")
+                    
+                    # Check if image dimensions are very large
+                    if width > 2000 or height > 2000:
+                        logger.warning(f"[REQUEST:{request_id}] Large image detected: {width}x{height}")
+                        
+                        # For very large images, resize to reduce memory usage
+                        if width > 4000 or height > 4000:
+                            logger.info(f"[REQUEST:{request_id}] Resizing very large image")
+                            # Calculate new dimensions while maintaining aspect ratio
+                            ratio = min(4000 / width, 4000 / height)
+                            new_width = int(width * ratio)
+                            new_height = int(height * ratio)
+                            image = image.resize((new_width, new_height), Image.LANCZOS)
+                            logger.info(f"[REQUEST:{request_id}] Resized to {new_width}x{new_height}")
+                    
+                    # Check for image metadata
+                    try:
+                        exif_data = image.getexif()
+                        if exif_data:
+                            logger.info(f"[REQUEST:{request_id}] Image has EXIF data with {len(exif_data)} tags")
+                    except Exception as exif_error:
+                        logger.warning(f"[REQUEST:{request_id}] Error reading EXIF data: {str(exif_error)}")
+                    
+                    # Check image mode and convert if necessary
+                    if image.mode != 'RGB':
+                        logger.info(f"[REQUEST:{request_id}] Converting image from {image.mode} to RGB")
+                        image = image.convert('RGB')
+                    
+                except Exception as img_error:
+                    logger.error(f"[REQUEST:{request_id}] Error opening image: {str(img_error)}")
+                    logger.error(traceback.format_exc())
+                    return jsonify({'error': f'Error processing image: {str(img_error)}'}), 500
                 
-                # Save transformed image
-                transformed_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{base_filename}_transformed{ext}")
-                transformed_image.save(transformed_path)
-                logger.info(f"Transformed image saved to: {transformed_path}")
+                # Set a timeout for transformation (300 seconds)
+                transform_start = time.time()
+                logger.info(f"[REQUEST:{request_id}] Starting transformation")
                 
-                # Return paths to both images
-                return jsonify({
-                    'original': f"/static/uploads/{os.path.basename(original_path)}",
-                    'transformed': f"/static/uploads/{os.path.basename(transformed_path)}"
-                })
+                try:
+                    # Explicitly create memory snapshots for debugging
+                    if torch.cuda.is_available():
+                        torch.cuda.reset_peak_memory_stats()
+                        pre_mem = torch.cuda.memory_allocated()/1024**2
+                        logger.info(f"[REQUEST:{request_id}] Pre-transform GPU memory: {pre_mem:.2f}MB")
+                    
+                    # Actually transform the image with additional error handling
+                    try:
+                        logger.info(f"[REQUEST:{request_id}] Calling ghibli_transform function")
+                        transformed_image = ghibli_transform(image)
+                        logger.info(f"[REQUEST:{request_id}] ghibli_transform function returned successfully")
+                    except Exception as transform_inner_error:
+                        logger.error(f"[REQUEST:{request_id}] Inner transformation error: {str(transform_inner_error)}")
+                        logger.error(traceback.format_exc())
+                        # Try with our fallback as a direct call
+                        logger.info(f"[REQUEST:{request_id}] Attempting direct fallback transformation")
+                        transformed_image = style_transfer.apply_fallback_transform(image)
+                    
+                    transform_time = time.time() - transform_start
+                    logger.info(f"[REQUEST:{request_id}] Transformation completed in {transform_time:.2f}s")
+                    
+                    # Additional CUDA memory stats
+                    if torch.cuda.is_available():
+                        post_mem = torch.cuda.memory_allocated()/1024**2
+                        peak_mem = torch.cuda.max_memory_allocated()/1024**2
+                        logger.info(f"[REQUEST:{request_id}] Post-transform GPU memory: {post_mem:.2f}MB, Peak: {peak_mem:.2f}MB")
+                    
+                    # Check if the result is valid
+                    if transformed_image is None:
+                        logger.error(f"[REQUEST:{request_id}] Transformation returned None result")
+                        raise ValueError("Transformation returned None result")
+                    
+                    # Verify the transformed image is actually a PIL Image
+                    if not isinstance(transformed_image, Image.Image):
+                        logger.error(f"[REQUEST:{request_id}] Result is not a PIL Image but {type(transformed_image)}")
+                        raise TypeError(f"Expected PIL Image but got {type(transformed_image)}")
+                    
+                    # Log the transformed image details
+                    logger.info(f"[REQUEST:{request_id}] Transformed image: size={transformed_image.size}, mode={transformed_image.mode}")
+                    
+                    # Save transformed image with error handling
+                    try:
+                        transformed_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{safe_base}_transformed{ext}")
+                        logger.info(f"[REQUEST:{request_id}] Saving transformed image to: {transformed_path}")
+                        transformed_image.save(transformed_path)
+                        logger.info(f"[REQUEST:{request_id}] Successfully saved transformed image")
+                    except Exception as save_error:
+                        logger.error(f"[REQUEST:{request_id}] Error saving transformed image: {str(save_error)}")
+                        logger.error(traceback.format_exc())
+                        raise
+                    
+                    # Clean up memory
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                    
+                    # Return paths to both images
+                    total_request_time = time.time() - request_start_time
+                    logger.info(f"[REQUEST:{request_id}] Request completed successfully in {total_request_time:.2f}s")
+                    return jsonify({
+                        'original': f"/static/uploads/{os.path.basename(original_path)}",
+                        'transformed': f"/static/uploads/{os.path.basename(transformed_path)}"
+                    })
+                except Exception as transform_error:
+                    # Specific logging for transformation errors
+                    logger.error(f"[ERROR:{request_id}] Transformation failed: {str(transform_error)}")
+                    logger.error(traceback.format_exc())
+                    
+                    # Try to clean up memory after error
+                    if torch.cuda.is_available():
+                        logger.info(f"[GPU:{request_id}] Cleaning up after error")
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                    
+                    return jsonify({'error': f'An error occurred during image transformation: {str(transform_error)}'}), 500
             except Exception as e:
-                logger.error(f"Error during transformation process: {str(e)}")
+                logger.error(f"[ERROR:{request_id}] Error in request processing: {str(e)}")
                 logger.error(traceback.format_exc())
-                return jsonify({'error': f'An error occurred during transformation: {str(e)}'}), 500
+                return jsonify({'error': f'An error occurred during transformation process: {str(e)}'}), 500
         else:
             logger.warning(f"File type not allowed: {file.filename}")
             return jsonify({'error': 'File type not allowed'}), 400
