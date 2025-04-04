@@ -1,127 +1,123 @@
 # Self-Hosted Kubernetes Cluster Architecture
 
-This document details the specific architecture and implementation of our self-hosted Kubernetes cluster on AWS, built with Terraform for GPU-accelerated workloads.
+This document outlines the architecture of our self-hosted Kubernetes cluster on AWS with GPU support for ML workloads.
 
-## 1. Infrastructure Overview
+## Infrastructure Overview
 
-Our cluster consists of:
-- 1 Control Plane nodes in an Auto Scaling Group for high availability
-- 1 Worker nodes with NVIDIA T4 GPUs (g4dn.xlarge) in an Auto Scaling Group
-- Network Load Balancer for the Kubernetes API
-- Elastic IP for stable access to services 
-- VPC with security groups for network isolation
+Our Kubernetes cluster consists of:
+- 1 Control Plane node (t3.medium)
+- 1 Worker node with NVIDIA T4 GPU (g4dn.xlarge)
+- Network Load Balancer for the Kubernetes API and service ingress
+- Elastic IP for stable access to services
 
-## 2. Key Components
+## Network Architecture Diagram
 
-### 2.1 Networking Infrastructure
-
-- **Calico CNI**: Used for pod networking with encapsulation mode set to VXLANCrossSubnet
-- **Pod CIDR**: 10.244.0.0/16 with 26-bit block size
-- **Service CIDR**: 10.96.0.0/12 (Kubernetes default)
-- **Static IP**: Elastic IP configured with `prevent_destroy = true` for persistent addressing
-
-### 2.2 Compute Resources
-
-- **Control Plane Nodes**: t3.medium instances (cost-optimized for control functions)
-- **Worker Nodes**: g4dn.xlarge instances with NVIDIA T4 GPUs
-  - Each with 4 vCPUs, 16GB RAM, and 1 NVIDIA T4 GPU (16GB VRAM)
-
-### 2.3 Software Components
-
-- **Kubernetes Version**: 1.29.3
-- **Container Runtime**: containerd with NVIDIA runtime for GPU support
-- **Control Plane Components**: 
-  - API Server, Controller Manager, Scheduler, etcd
-  - Calico Operator for network management
-- **Worker Components**:
-  - kubelet with systemd cgroup driver
-  - NVIDIA Device Plugin for GPU orchestration
-  - Automatic port forwarding for ingress traffic
-
-## 3. Network Architecture
-
-### 3.1 Calico Implementation
-
-Our cluster uses Calico instead of Flannel for enhanced networking capabilities:
-
-```yaml
-# Applied configuration:
-apiVersion: operator.tigera.io/v1
-kind: Installation
-metadata:
-  name: default
-spec:
-  calicoNetwork:
-    ipPools:
-    - blockSize: 26
-      cidr: 10.244.0.0/16
-      encapsulation: VXLANCrossSubnet
-      natOutgoing: Enabled
-      nodeSelector: all()
+```
+                                                    ┌──────────────────────┐
+                                                    │                      │
+                                                    │   AWS Cloud Region   │
+                                                    │                      │
+                                                    └──────────────────────┘
+                                                              │
+                                                              ▼
+                          ┌───────────────────────────────────────────────────────────┐
+                          │                        VPC 10.0.0.0/16                    │
+                          │                                                           │
+          ┌───────────────┴───────────────┐                 ┌───────────────────────┐ │
+          │                               │                 │                       │ │
+┌─────────▼─────────┐    ┌───────────────▼──────────┐      │   ┌─────────────────┐ │ │
+│                   │    │                          │      │   │ Elastic IP      │ │ │
+│   Public Subnet   │    │     Public Subnet        │      │   └────────┬────────┘ │ │
+│   10.0.1.0/24     │    │     10.0.2.0/24          │      │            │          │ │
+│                   │    │                          │      │   ┌────────▼────────┐ │ │
+│ ┌───────────────┐ │    │ ┌──────────────────────┐ │      │   │ Network Load   │ │ │
+│ │ Control Plane │ │    │ │  Worker Node w/GPU   │ │      │   │ Balancer       │ │ │
+│ │ t3.medium     │ │    │ │  g4dn.xlarge         │ │      │   └────────┬────────┘ │ │
+│ │               │◄┼────┼─┼─────────────────────►│ │      │            │          │ │
+│ │ kube-apiserver│ │    │ │ kubelet              │ │      │            │          │ │
+│ │ etcd          │ │    │ │ NVIDIA GPU Driver    │ │      │            │          │ │
+│ │ scheduler     │ │    │ │ containerd           │ │      │            │          │ │
+│ │ controller-mgr│ │    │ │ NVIDIA Runtime       │ │      │            │          │ │
+│ └───────────────┘ │    │ │                      │ │      │            │          │ │
+│         ▲         │    │ │ ┌──────────────────┐ │ │      │            │          │ │
+│         │         │    │ │ │ Ingress NGINX    │◄┼─┼──────┼────────────┘          │ │
+│         │         │    │ │ │ Controller       │ │ │      │                       │ │
+│         │         │    │ │ └──────────────────┘ │ │      │                       │ │
+│         │         │    │ │                      │ │      │                       │ │
+│         │         │    │ │ ┌──────────────────┐ │ │      │                       │ │
+│         └─────────┼────┼─┼►│ CoreDNS          │ │ │      │                       │ │
+│                   │    │ │ └──────────────────┘ │ │      │                       │ │
+│                   │    │ │                      │ │      │                       │ │
+│                   │    │ │ ┌──────────────────┐ │ │      │                       │ │
+│                   │    │ │ │ Calico           │ │ │      │                       │ │
+│                   │    │ │ └──────────────────┘ │ │      │                       │ │
+│                   │    │ │                      │ │      │                       │ │
+│                   │    │ │ ┌──────────────────┐ │ │      │                       │ │
+│                   │    │ │ │ Ghibli App (Pod) │ │ │      │                       │ │
+│                   │    │ │ │ w/GPU Access     │ │ │      │                       │ │
+│                   │    │ │ └──────────────────┘ │ │      │                       │ │
+│                   │    │ └──────────────────────┘ │      │                       │ │
+└───────────────────┘    └─────────────────────────┘      └───────────────────────┘ │
+                          │                                                           │
+                          └───────────────────────────────────────────────────────────┘
+                                                │
+                                                ▼
+                          ┌─────────────────────────────────────────┐
+                          │                                         │
+                          │               Internet                  │
+                          │                                         │
+                          └─────────────────────────────────────────┘
 ```
 
-Calico provides:
-- More fine-grained network policies than Flannel
-- Better performance and debugging capabilities
-- VXLANCrossSubnet encapsulation for traffic between different subnets
-- NAT for outgoing traffic
+## Key Components
 
-### 3.2 Ingress and Load Balancer Architecture
+### Compute Resources
 
-#### 3.2.1 AWS Load Balancer Controller
+- **Control Plane**: t3.medium instance (2 vCPU, 4GB RAM)
+  - Runs: kube-apiserver, etcd, controller-manager, scheduler
+  - Located in an Auto Scaling Group for recovery
 
-The AWS Load Balancer Controller manages AWS resources on behalf of Kubernetes:
+- **Worker Node**: g4dn.xlarge instance
+  - 4 vCPUs, 16GB RAM, 1 NVIDIA T4 GPU (16GB VRAM)
+  - Runs: kubelet, kube-proxy, containerd, calico, ingress-nginx
+  - Located in an Auto Scaling Group for recovery
 
-- **Network Load Balancer (NLB)**:
-  - Created and managed by the AWS Load Balancer Controller
-  - Configured as internet-facing for external access
-  - Routes traffic to worker nodes' NodePorts
+### Network Layer
 
-- **Target Groups**:
-  - Automatically created for each LoadBalancer service
-  - Configured for instance-type targets
-  - **Important**: Requires manual target registration for custom services
+- **Pod Networking**: Calico CNI (10.244.0.0/16)
+  - Uses VXLAN encapsulation between subnets
+  - Provides network policies for security
 
-- **Flow of Traffic**:
-  ```
-  Internet → AWS NLB → Worker Node NodePorts → Ingress-NGINX → ClusterIP Services → Application Pods
-  ```
+- **Service Networking**: Kubernetes Services (10.96.0.0/12)
+  - ClusterIP services for internal communication
+  - LoadBalancer services via AWS Load Balancer Controller
 
-#### 3.2.2 NGINX Ingress Controller
+- **Ingress**: NGINX Ingress Controller
+  - Deployed on the worker node
+  - Exposed via AWS Network Load Balancer
+  - TLS termination with Let's Encrypt certificates via cert-manager
 
-- **Deployment**:
-  - Runs as pods with the nginx-ingress controller image
-  - Configured to use TLS certificates from cert-manager
-  - Handles HTTP/HTTPS routing based on hostname and path
+## Ghibli Application
 
-- **Services**:
-  - `ingress-nginx-controller`: NodePort service (internal)
-    - HTTP: NodePort 32245
-    - HTTPS: NodePort 32479
-  - `ingress-nginx-lb`: LoadBalancer service (external)
-    - Maps external ports 80/443 to the NodePorts
+Our main application is a GPU-accelerated image transformer that converts regular photos to Ghibli-style animations.
 
-- **Target Registration**:
-  - Target groups require manual registration of worker node instances
-  - Automated via the `register_target_groups.sh` script:
-    ```bash
-    # Auto-detects target groups and registers the instance
-    aws elbv2 register-targets --region ${AWS_REGION} \
-      --target-group-arn ${TARGET_GROUP_ARN} \
-      --targets Id=${INSTANCE_ID},Port=${PORT}
-    ```
+### Application Architecture
 
-#### 3.2.3 Application Services
+- **Frontend**: Simple HTML/CSS/JS for image upload and display
+- **Backend**: Flask application with PyTorch
+- **GPU Integration**: Uses CUDA for tensor operations
+- **Deployment**: Kubernetes pod with GPU resource request
 
-- **ClusterIP Services**:
-  - Internal-only Kubernetes services for application pods
-  - No direct exposure to the internet
-  - Accessed only through the Ingress resources
-  
-- **Ingress Resources**:
-  - Define routing rules based on hostnames and paths
-  - Specify TLS certificate requirements
-  - Redirect HTTP to HTTPS for security
+### Network Flow
+
+```
+User Request → 
+  AWS NLB (443) → 
+    Ingress NGINX → 
+      Ghibli Service → 
+        Ghibli Pod (w/GPU) →
+          Response
+```
 
 ## 4. GPU Infrastructure
 
@@ -147,30 +143,44 @@ The worker node initialization script:
 3. Sets up the device plugin directory with proper permissions
 4. Adds RuntimeClass for GPU workloads
 
-## 5. Ghibli Application Deployment
+## Monitoring Infrastructure
 
-Our first GPU-accelerated application is a Ghibli-style image transformer:
+Our cluster includes a comprehensive monitoring stack providing visibility into all aspects of the system:
 
-### 5.1 Application Architecture
+### Kubernetes Dashboard
+- Official Kubernetes web UI (v2.7.0)
+- Provides visualization of all cluster resources
+- Secure access via token-based authentication
+- Admin service account with cluster-admin role
+- Access through secure kubectl proxy connection
 
-- **Frontend**: HTML/CSS/JavaScript for image upload and transformation
-- **Backend**: Flask application running PyTorch inference
-- **Inference**: GPU-accelerated deep learning model based on AnimeGANv2
-- **Deployment**: Single replica pod with GPU resource request
+### Prometheus Monitoring
+- Deployed via kube-prometheus-stack Helm chart
+- Collects metrics from multiple sources:
+  - Kubernetes components (API server, scheduler, etc.)
+  - Node exporters (CPU, memory, disk utilization)
+  - Container metrics
+  - NVIDIA GPU metrics (utilization, memory, temperature)
+- Custom scrape configurations for application metrics
+- Alert manager integration for notification
+- Retention configuration for historical data
 
-### 5.2 Kubernetes Resources
+### Grafana Dashboards
+- Pre-configured with Prometheus data source
+- Multiple dashboard configurations:
+  - Kubernetes cluster overview
+  - Node resource utilization
+  - Pod resource consumption
+  - GPU performance metrics
+  - Network traffic visualization
+- Default dashboards extended with application-specific panels
+- User-friendly interface with templating and variables
 
-- **Deployment**: 
-  - Requests 1 NVIDIA GPU
-  - Uses NVIDIA RuntimeClass
-  - Runs in hostNetwork mode for direct GPU access
-
-- **Service**:
-  - ClusterIP service exposing port 80 → container port 5000
-  
-- **Ingress**:
-  - HTTPS-enabled with Let's Encrypt certificates
-  - Domain: ghibli.doandlearn.app
+### Automated Port Forwarding
+- Background process management for monitoring services
+- Automatic token retrieval for authentication
+- Status tracking for running port forwards
+- Unified interface for starting/stopping monitoring access
 
 ## 6. TLS & Certificate Management
 
@@ -209,143 +219,20 @@ The cluster includes scripts for scaling down when not in use:
 
 | Component | Type | Monthly Cost |
 |-----------|------|--------------|
-| Control Plane | 2 x t3.medium | ~$60 |
-| Worker Nodes | 3 x g4dn.xlarge | ~$114 (spot) |
+| Control Plane | 1 x t3.medium | ~$30 |
+| Worker Nodes | 1 x g4dn.xlarge | ~$38 (spot) |
 | Network LB | - | ~$16.43 |
 | Elastic IP | - | $0-3.60 |
-| EBS Storage | gp3 | ~$30 |
-| **Total** | - | **~$220/month** |
+| EBS Storage | gp3 | ~$15 |
+| **Total** | - | **~$100/month** |
 
 With sleep/wake functionality, costs can be reduced by up to 80% during inactive periods.
 
-## 8. High Availability Design
-
-### 8.1 Control Plane Redundancy
-
-- **Multi-Node Setup**: Two control plane nodes for redundancy
-- **Leader Election**: Kubernetes components use leader election
-- **etcd Cluster**: Distributed across control plane nodes
-- **Certificate Sharing**: Secured with kubeadm certificate upload
-
-### 8.2 Worker Node Resilience
-
-- **Auto Scaling Groups**: Automatically replace failed nodes
-- **Node Join Process**: Multi-stage with fallback mechanisms:
-  ```bash
-  # Try to get fresh join command from control plane nodes
-  # If that fails, use a fallback mechanism with discovery token
-  if [ -z "$JOIN_COMMAND" ]; then
-    JOIN_COMMAND="kubeadm join $CONTROL_PLANE_LB:6443 --token abcdef.0123456789abcdef --discovery-token-unsafe-skip-ca-verification --node-name $HOSTNAME"
-  fi
-  ```
-
-### 8.3 Static IP Preservation
-
-- **Elastic IP Strategy**:
-  - Configured with `prevent_destroy = true` in Terraform
-  - Persists across cluster destroy/create cycles
-  - Ensures services maintain the same public IP address
-  - Simplifies DNS configuration
-
-## 9. Monitoring and Observability
-
-### 9.1 Monitoring Infrastructure
-
-Our cluster monitoring stack consists of:
-
-- **Kubernetes Dashboard**: Visualization of cluster resources and state
-- **Prometheus**: Time-series metrics collection and storage
-- **Grafana**: Metrics visualization and dashboarding
-- **kube-prometheus-stack**: Comprehensive monitoring for Kubernetes components
-
-### 9.2 Kubernetes Dashboard
-
-- Official Kubernetes web UI (v2.7.0)
-- Displays cluster resources, deployments, and workloads
-- Secure access via token-based authentication
-- Admin service account with cluster-admin ClusterRole
-- Accessible via kubectl proxy at:
-  ```
-  http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/
-  ```
-
-### 9.3 Prometheus Monitoring
-
-- Deployed using Helm chart from prometheus-community
-- Collects metrics from:
-  - Kubernetes components (kubelet, API server, etc.)
-  - Node-level metrics (CPU, memory, disk)
-  - Container metrics
-  - Calico networking components
-  - NVIDIA GPU metrics
-- Runs in dedicated `monitoring` namespace
-- Configured with ClusterIP service for internal access
-- Accessible via port-forwarding:
-  ```
-  kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
-  ```
-
-### 9.4 Grafana Dashboard
-
-- Deployed as part of kube-prometheus-stack
-- Pre-configured with Prometheus data source
-- Default dashboards for:
-  - Kubernetes cluster overview
-  - Node resources
-  - Pod resources
-  - GPU utilization
-- Accessible via port-forwarding:
-  ```
-  kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
-  ```
-- Default credentials: admin/admin
-
-### 9.5 Logging and Debugging
-
-- **System Logs**: systemd journal for host-level components
-- **Container Logs**: Accessible via kubectl logs
-- **Network Debugging**:
-  - Calico diagnostic tools
-  - tcpdump and iptables inspection
-  - Connection tracking with conntrack
-- **GPU Monitoring**: 
-  - nvidia-smi for device status
-  - Prometheus metrics for utilization tracking
-
-## 10. Automation and Management
-
-### 10.1 Makefile Infrastructure
-
-The project uses a comprehensive Makefile to streamline common operations. This Makefile simplifies cluster management with targets for:
-
-- Initial infrastructure provisioning
-- Kubernetes component installation
-- Cluster sleep/wake operations
-- Monitoring setup
-- Status checking and diagnostics
-
-Common operations can be performed with simple commands like:
-- `make apply` - Deploy the cluster infrastructure
-- `make install-gpu-plugin` - Configure GPU support
-- `make sleep` - Scale down the cluster for cost savings
-- `make monitoring-all` - Deploy complete monitoring stack
-
-### 10.2 Application Deployment Automation
-
-The Ghibli application uses its own deployment script (`deploy.sh`) to automate the build and deployment process. This script handles:
-
-- Cross-platform Docker image building (for amd64 target)
-- Dynamic image tagging with timestamps
-- Automatic Kubernetes manifest updates
-- Resource application and deployment validation
-
-Using these automation tools significantly reduces operational overhead and ensures consistent deployments across environments.
-
-## 11. Challenges and Lessons Learned
+## Challenges and Lessons Learned
 
 Throughout the development of this self-hosted Kubernetes cluster, we encountered several significant challenges that provide valuable insights for similar projects.
 
-### 11.1 GPU Support Complexity
+### GPU Support Complexity
 
 Integrating NVIDIA GPUs with Kubernetes proved challenging due to:
 
@@ -360,7 +247,7 @@ Integrating NVIDIA GPUs with Kubernetes proved challenging due to:
 3. Configures containerd with proper NVIDIA runtime handlers
 4. Tests for GPU visibility with verification steps
 
-### 11.2 Networking Challenges
+### Networking Challenges
 
 The initial Flannel CNI implementation faced several issues:
 
@@ -375,7 +262,7 @@ The initial Flannel CNI implementation faced several issues:
 3. Robust network policy implementation
 4. Improved performance with optimized data paths
 
-### 11.3 Port Forwarding and Ingress Complexities
+### Port Forwarding and Ingress Complexities
 
 Exposing applications externally presented unique challenges:
 
@@ -390,7 +277,7 @@ Exposing applications externally presented unique challenges:
 3. Integration with cert-manager for automated TLS certificate management
 4. Elastic IP association for stable external addressing
 
-### 11.4 Node Identity and Join Process
+### Node Identity and Join Process
 
 Kubernetes cluster formation had several failure points:
 
@@ -405,26 +292,94 @@ Kubernetes cluster formation had several failure points:
 3. Creating a multi-stage join process with fallback mechanisms
 4. Distributing SSH keys to allow secure node-to-node communication
 
-### 11.5 Statelessness and Persistence
+## Configuration Management
 
-Maintaining cluster state through scale-down/up cycles was challenging:
+Our project employs a multi-layered approach to configuration management, using different tools at different layers of the stack based on their strengths.
 
-- **Configuration Persistence**: Preserving cluster configuration during sleep/wake cycles
-- **Elastic IP Management**: Ensuring consistent IP addressing for external access
-- **Service Reconfiguration**: Reinstalling ingress controllers without changing external endpoints
-- **Credentials Management**: Preserving secrets and credentials across cluster rebuilds
+### Terraform for Infrastructure
 
-**Solution**: We designed a comprehensive state management approach:
-1. Using persistent EBS volumes for critical data
-2. Creating a "prevent_destroy" configuration for Elastic IPs
-3. Implementing proper node initialization scripts that handle rejoining
-4. Automating the reinstallation of critical components after wakeup
+We use Terraform to manage all AWS infrastructure components:
 
-## 12. Future Enhancements
+- **Core Infrastructure**: VPC, subnets, security groups, and internet gateways
+- **Compute Resources**: EC2 instances via Auto Scaling Groups for both control plane and worker nodes
+- **Network Components**: Elastic IP allocation, Network Load Balancer setup
+- **IAM Configuration**: Roles and policies for AWS Load Balancer Controller and worker nodes
+
+Terraform was chosen for infrastructure management because it:
+- Provides declarative configuration for AWS resources
+- Maintains state tracking for complex dependencies
+- Supports incremental changes without full rebuilds
+- Allows versioning of infrastructure code in git
+- Enables modular resource organization (modules directory)
+
+Key Terraform modules in our setup:
+- **Main infrastructure**: `/terraform/main.tf` defines the main cluster components
+- **Load balancer controller**: `/terraform/modules/lb-controller/main.tf` configures the AWS Load Balancer Controller integration
+- **Node initialization**: Templates in `/terraform/scripts/` for both control plane and worker nodes
+
+### Helm for Kubernetes Applications
+
+We use Helm charts for deploying complex Kubernetes applications:
+
+- **Monitoring Stack**: kube-prometheus-stack chart for Prometheus, Grafana, and AlertManager
+- **Ingress Controller**: nginx-ingress chart for the NGINX ingress controller
+- **Certificate Management**: cert-manager chart for TLS automation
+
+Helm was selected because it:
+- Packages complex multi-resource applications into single deployable units
+- Provides version management for Kubernetes manifests
+- Supports configuration value overrides for different environments
+- Handles upgrades and rollbacks for application lifecycle
+- Manages dependencies between Kubernetes components
+
+### Shell Scripts for Orchestration and Glue
+
+Shell scripts serve as the orchestration layer and glue between different components:
+
+- **Installation Scripts**: `/scripts/` directory contains individual component installers
+- **Cluster Management**: `/scripts/manage_cluster.sh` for sleep/wake and status functionality
+- **Monitoring Setup**: `/scripts/manage_monitoring.sh` for dashboard and metrics installation
+- **Access Management**: `/scripts/access_dashboard.sh` for automated port forwarding
+- **Application Deployment**: `/ghibli-app/deploy.sh` for building and deploying the GPU application
+
+We chose shell scripts because they:
+- Provide a simple interface for complex operations
+- Integrate tool outputs across different systems (Terraform, kubectl, AWS CLI)
+- Allow for error handling and recovery procedures
+- Can be easily extended with new functionality
+- Support both automation and interactive usage
+
+### Kubernetes Manifests for Application Configuration
+
+For application-specific configuration, we use direct Kubernetes manifests:
+
+- **Ghibli Application**: `/ghibli-app/k8s/` directory contains deployment, service, and ingress definitions
+- **TLS Configuration**: Custom ClusterIssuer resources for cert-manager
+- **Network Policies**: Calico policy definitions
+
+Raw manifests were used here because they:
+- Provide precise control over application-specific resources
+- Are easier to understand for simpler deployments
+- Can be version-controlled directly with the application code
+- Serve as educational examples of Kubernetes resource configuration
+
+### Makefile as User Interface
+
+The Makefile serves as a unified command interface that orchestrates all these tools:
+
+- Provides consistent commands for common operations
+- Hides implementation details from end users
+- Ensures correct execution order for dependent operations
+- Improves project learnability with self-documented commands
+
+This layered approach to configuration management allows us to use the right tool for each job while maintaining a cohesive system that can be managed as a whole.
+
+## Future Enhancements
 
 Planned improvements include:
 
-1. **Security**: This is a very basic setup where we've not looked at security/privacy
+1. **Security**: This is a basic setup where we've not fully implemented security best practices
 2. **Horizontal Pod Autoscaling**: Dynamic scaling based on GPU utilization
 3. **CI/CD Pipeline**: Automated deployment workflow
-4. **Monitoring**: Set up focused alerts and also useful metrics, tracing etc. Also make the existing Observability stack more robust.
+4. **Monitoring Enhancements**: Set up focused alerts and more comprehensive metrics, tracing, and logging
+5. **GitOps Adoption**: Moving toward a GitOps model with tools like ArgoCD or Flux
