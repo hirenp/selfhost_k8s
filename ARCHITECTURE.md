@@ -6,9 +6,8 @@ This document outlines the architecture of our self-hosted Kubernetes cluster on
 
 Our Kubernetes cluster consists of:
 - 1 Control Plane node (t3.medium)
-- 1 Worker node with NVIDIA T4 GPU (g4dn.xlarge)
+- 1 Worker node with NVIDIA T4 GPU (g4dn.xlarge) 
 - Network Load Balancer for the Kubernetes API and service ingress
-- Elastic IP for stable access to services
 
 ## Network Architecture Diagram
 
@@ -20,18 +19,18 @@ Our Kubernetes cluster consists of:
                                                     └──────────────────────┘
                                                               │
                                                               ▼
-                          ┌───────────────────────────────────────────────────────────┐
-                          │                        VPC 10.0.0.0/16                    │
-                          │                                                           │
-          ┌───────────────┴───────────────┐                 ┌───────────────────────┐ │
-          │                               │                 │                       │ │
-┌─────────▼─────────┐    ┌───────────────▼──────────┐      │   ┌─────────────────┐ │ │
-│                   │    │                          │      │   │ Elastic IP      │ │ │
-│   Public Subnet   │    │     Public Subnet        │      │   └────────┬────────┘ │ │
-│   10.0.1.0/24     │    │     10.0.2.0/24          │      │            │          │ │
-│                   │    │                          │      │   ┌────────▼────────┐ │ │
-│ ┌───────────────┐ │    │ ┌──────────────────────┐ │      │   │ Network Load   │ │ │
-│ │ Control Plane │ │    │ │  Worker Node w/GPU   │ │      │   │ Balancer       │ │ │
+                          ┌──────────────────────────────────────────────────────────┐
+                          │                        VPC 10.0.0.0/16                   │
+                          │                                                          │
+          ┌───────────────┴──────────────┐                 ┌───────────────────────┐ │
+          │                              │                 │                       │ │
+┌─────────▼─────────┐    ┌───────────────▼──────────┐      │                       │ │
+│                   │    │                          │      │                       │ │
+│   Public Subnet   │    │     Public Subnet        │      │                       │ │
+│   10.0.1.0/24     │    │     10.0.2.0/24          │      │                       │ │
+│                   │    │                          │      │   ┌─────────────────┐ │ │
+│ ┌───────────────┐ │    │ ┌──────────────────────┐ │      │   │ Network Load    │ │ │
+│ │ Control Plane │ │    │ │  Worker Node w/GPU   │ │      │   │ Balancer        │ │ │
 │ │ t3.medium     │ │    │ │  g4dn.xlarge         │ │      │   └────────┬────────┘ │ │
 │ │               │◄┼────┼─┼─────────────────────►│ │      │            │          │ │
 │ │ kube-apiserver│ │    │ │ kubelet              │ │      │            │          │ │
@@ -57,9 +56,9 @@ Our Kubernetes cluster consists of:
 │                   │    │ │ │ w/GPU Access     │ │ │      │                       │ │
 │                   │    │ │ └──────────────────┘ │ │      │                       │ │
 │                   │    │ └──────────────────────┘ │      │                       │ │
-└───────────────────┘    └─────────────────────────┘      └───────────────────────┘ │
-                          │                                                           │
-                          └───────────────────────────────────────────────────────────┘
+└───────────────────┘    └──────────────────────────┘      └───────────────────────┘ │
+                         │                                                           │
+                         └───────────────────────────────────────────────────────────┘
                                                 │
                                                 ▼
                           ┌─────────────────────────────────────────┐
@@ -207,13 +206,11 @@ The cluster includes scripts for scaling down when not in use:
 - **Sleep Mode**: 
   - Scales EC2 instances to 0
   - Removes the Network Load Balancer
-  - Preserves Elastic IP allocation
   - Retains all Kubernetes state (etcd data)
 
 - **Wake Mode**:
   - Restores instances to desired count
   - Recreates the Network Load Balancer
-  - Re-attaches the Elastic IP
 
 ### 7.2 Cost Breakdown
 
@@ -222,9 +219,8 @@ The cluster includes scripts for scaling down when not in use:
 | Control Plane | 1 x t3.medium | ~$30 |
 | Worker Nodes | 1 x g4dn.xlarge | ~$38 (spot) |
 | Network LB | - | ~$16.43 |
-| Elastic IP | - | $0-3.60 |
 | EBS Storage | gp3 | ~$15 |
-| **Total** | - | **~$100/month** |
+| **Total** | - | **~$99/month** |
 
 With sleep/wake functionality, costs can be reduced by up to 80% during inactive periods.
 
@@ -275,7 +271,7 @@ Exposing applications externally presented unique challenges:
 1. Custom iptables rules inserted with proper precedence relative to Calico rules
 2. hostPort configuration in the ingress controller deployment
 3. Integration with cert-manager for automated TLS certificate management
-4. Elastic IP association for stable external addressing
+4. Network Load Balancer for stable external addressing
 
 ### Node Identity and Join Process
 
@@ -302,7 +298,7 @@ We use Terraform to manage all AWS infrastructure components:
 
 - **Core Infrastructure**: VPC, subnets, security groups, and internet gateways
 - **Compute Resources**: EC2 instances via Auto Scaling Groups for both control plane and worker nodes
-- **Network Components**: Elastic IP allocation, Network Load Balancer setup
+- **Network Components**: Network Load Balancer setup, VPC configuration
 - **IAM Configuration**: Roles and policies for AWS Load Balancer Controller and worker nodes
 
 Terraform was chosen for infrastructure management because it:
