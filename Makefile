@@ -59,6 +59,9 @@ enable-tls:
 	@echo ""
 	@echo "To access your application, add a CNAME record in Cloudflare DNS:"
 	@echo "ghibli.doandlearn.app → $(shell kubectl get svc -n ingress-nginx ingress-nginx-lb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+	@echo ""
+	@echo "Run this command on each worker node to register targets:"
+	@echo "ssh ubuntu@WORKER_NODE_IP 'sudo /bin/bash -c \"curl -s https://raw.githubusercontent.com/yourusername/selfhost_k8s/main/scripts/register_target_groups.sh | bash\"'"
 
 sleep:
 	./scripts/manage_cluster.sh sleep
