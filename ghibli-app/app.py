@@ -2,7 +2,7 @@ from flask import Flask, request, render_template, jsonify
 import torch
 from torch import nn
 import torchvision.transforms as transforms
-from PIL import Image
+from PIL import Image, ImageFile
 import io
 import base64
 import os
@@ -11,8 +11,12 @@ import traceback
 import logging
 import time
 import gc
+import math
 import psutil
 from werkzeug.utils import secure_filename
+
+# Enable loading of truncated images
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # Configure more aggressive logging
 logging.basicConfig(
@@ -42,7 +46,36 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'static/uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # Increased to 25MB max file size
+
+# Function to calculate safe image dimensions based on available memory
+def calculate_safe_image_size():
+    try:
+        if torch.cuda.is_available():
+            # Get available GPU memory in MB
+            free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            free_memory_mb = free_memory / (1024**2)
+            # Conservative estimate: each pixel needs ~20 bytes for processing in the pipeline
+            max_pixels = int((free_memory_mb * 0.7 * 1024**2) / 20)
+            # Square root to get max dimension for a square image
+            max_dimension = int(math.sqrt(max_pixels))
+            logger.info(f"GPU-based safe image size: {max_dimension}x{max_dimension} ({max_pixels} pixels)")
+            # Cap at reasonable limits
+            return min(max_dimension, 3000)
+        else:
+            # CPU fallback - more conservative
+            system_memory = psutil.virtual_memory().available
+            system_memory_mb = system_memory / (1024**2)
+            # More conservative estimate for CPU processing
+            max_pixels = int((system_memory_mb * 0.5 * 1024**2) / 30)
+            max_dimension = int(math.sqrt(max_pixels))
+            logger.info(f"CPU-based safe image size: {max_dimension}x{max_dimension} ({max_pixels} pixels)")
+            # Cap at reasonable limits for CPU
+            return min(max_dimension, 2000)
+    except Exception as e:
+        logger.error(f"Error calculating safe image size: {str(e)}")
+        # Default safe size
+        return 2000
 
 # Ensure the upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -101,26 +134,66 @@ class GhibliStyleTransfer:
             logger.info(f"CUDA Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MB reserved")
     
     def preprocess(self, image):
-        """Preprocess the image for the model"""
+        """Preprocess the image for the model with intelligent memory-aware resizing"""
         try:
             logger.debug(f"[PREPROCESS] Input image size: {image.size}, mode: {image.mode}")
-            
-            # For very large images, resize in two steps to avoid memory issues
             width, height = image.size
-            if width > 2000 or height > 2000:
-                logger.info(f"[PREPROCESS] Large image detected ({width}x{height}), using two-step resize")
-                # Step 1: Resize to intermediate size first
-                intermediate_size = (1024, 1024)
-                image = image.resize(intermediate_size, Image.LANCZOS)
-                logger.debug(f"[PREPROCESS] Intermediate resize to {intermediate_size}")
+            safe_size = calculate_safe_image_size()
             
-            # Step 2: Apply the standard transformation
+            # For large images, use a more sophisticated resizing approach
+            if width > safe_size or height > safe_size:
+                logger.info(f"[PREPROCESS] Large image detected ({width}x{height}), memory-aware resizing")
+                
+                # Calculate aspect ratio for proportional resize
+                aspect_ratio = width / height
+                
+                if aspect_ratio >= 1:  # Wider than tall
+                    new_width = min(width, safe_size)
+                    new_height = int(new_width / aspect_ratio)
+                else:  # Taller than wide
+                    new_height = min(height, safe_size)
+                    new_width = int(new_height * aspect_ratio)
+                
+                logger.info(f"[PREPROCESS] Resizing to {new_width}x{new_height} (safe limit: {safe_size})")
+                
+                # For very large images, resize in multiple steps to preserve quality
+                if width > safe_size*1.5 or height > safe_size*1.5:
+                    # Step 1: Resize to intermediate size first (70% of final)
+                    logger.info("[PREPROCESS] Using multi-step resizing for large image")
+                    intermediate_width = int(new_width * 1.5)
+                    intermediate_height = int(new_height * 1.5)
+                    
+                    logger.debug(f"[PREPROCESS] Step 1: Resizing to {intermediate_width}x{intermediate_height}")
+                    image = image.resize((intermediate_width, intermediate_height), Image.LANCZOS)
+                    
+                    # Force a garbage collection after first resize
+                    gc.collect()
+                
+                # Final resize to target size
+                logger.debug(f"[PREPROCESS] Final resize to {new_width}x{new_height}")
+                image = image.resize((new_width, new_height), Image.LANCZOS)
+            
+            # Give model accurate image dimensions
+            model_input_size = (512, 512)
+            
+            # Apply the standard transformation
             transform = transforms.Compose([
-                transforms.Resize((512, 512)),
+                transforms.Resize(model_input_size),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ])
+            
+            # Log memory before tensor creation
+            if self.device.type == "cuda":
+                logger.debug(f"[PREPROCESS] Pre-tensor GPU memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            
+            # Create and move tensor to device
             tensor = transform(image).unsqueeze(0).to(self.device)
+            
+            # Log memory after tensor creation
+            if self.device.type == "cuda":
+                logger.debug(f"[PREPROCESS] Post-tensor GPU memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            
             logger.debug(f"[PREPROCESS] Output tensor shape: {tensor.shape}")
             return tensor
         except Exception as e:
@@ -336,22 +409,22 @@ class GhibliStyleTransfer:
                 # Apply global Ghibli-style adjustments
                 
                 # 1. Overall color balance
-                # Slightly increase contrast globally 
-                stylized = (stylized - 0.5) * 1.2 + 0.5
+                # Dramatically increase brightness with preserved contrast
+                stylized = (stylized - 0.5) * 1.15 + 0.8  # Dramatic brightness increase
                 stylized = stylized.clamp(0, 1)
                 
                 # 2. Add a subtle pastel tint characteristic of Ghibli films
                 logger.info("[TRANSFORM] Adding pastel tint")
                 try:
                     # Create tensor on the same device as stylized
-                    pastel_tint = torch.tensor([0.02, 0.02, 0.05], device=stylized.device)  # Slight blue tint
+                    pastel_tint = torch.tensor([0.15, 0.15, 0.2], device=stylized.device)  # Bright pastel tint
                     logger.debug(f"[TENSOR] Pastel tint device: {pastel_tint.device}, Stylized device: {stylized.device}")
                     
                     # Check shapes before operating
                     logger.debug(f"[TENSOR] Stylized shape: {stylized.shape}, Pastel tint shape: {pastel_tint.shape}")
                     
                     # Explicitly use clone to avoid in-place modification issues
-                    result = stylized.clone() * (1 - 0.15) + pastel_tint.view(3, 1, 1) * 0.15
+                    result = stylized.clone() * (1 - 0.25) + pastel_tint.view(3, 1, 1) * 0.25  # Increased tint contribution
                     stylized = result
                 except Exception as tint_error:
                     logger.error(f"[ERROR] Error applying pastel tint: {str(tint_error)}")
@@ -474,10 +547,10 @@ class GhibliStyleTransfer:
                 enhancer = ImageEnhance.Contrast(result)
                 result = enhancer.enhance(1.2)  # Ghibli's high contrast
                 
-                # 4. Slightly brighten
-                logger.info("[FALLBACK] Adjusting brightness")
+                # 4. Dramatically increase brightness
+                logger.info("[FALLBACK] Adjusting brightness dramatically")
                 enhancer = ImageEnhance.Brightness(result)
-                result = enhancer.enhance(1.05)  # Ghibli's bright palette
+                result = enhancer.enhance(1.7)  # Maximum brightness boost for Ghibli's palette
                 
                 # 5. Sharpen slightly to recover details
                 logger.info("[FALLBACK] Sharpening")
@@ -601,19 +674,25 @@ def transform_image():
                     width, height = image.size
                     logger.info(f"[REQUEST:{request_id}] Image properties: size={width}x{height}, mode={image.mode}, format={image.format}")
                     
-                    # Check if image dimensions are very large
-                    if width > 2000 or height > 2000:
-                        logger.warning(f"[REQUEST:{request_id}] Large image detected: {width}x{height}")
+                    # Check image against our adaptive limits
+                    safe_size = calculate_safe_image_size()
+                    logger.info(f"[REQUEST:{request_id}] Current safe image size limit: {safe_size}px")
+                    
+                    # Early validation of image dimensions
+                    if width * height > 50000000:  # 50 megapixels
+                        logger.warning(f"[REQUEST:{request_id}] Extremely large image detected: {width}x{height} ({width*height} pixels)")
                         
-                        # For very large images, resize to reduce memory usage
-                        if width > 4000 or height > 4000:
-                            logger.info(f"[REQUEST:{request_id}] Resizing very large image")
-                            # Calculate new dimensions while maintaining aspect ratio
-                            ratio = min(4000 / width, 4000 / height)
-                            new_width = int(width * ratio)
-                            new_height = int(height * ratio)
-                            image = image.resize((new_width, new_height), Image.LANCZOS)
-                            logger.info(f"[REQUEST:{request_id}] Resized to {new_width}x{new_height}")
+                    # Early memory cleanup before processing large images
+                    if width > safe_size or height > safe_size:
+                        # Clear memory before we start processing
+                        if torch.cuda.is_available():
+                            logger.info(f"[REQUEST:{request_id}] Pre-emptive memory cleanup for large image")
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            # Report available memory
+                            free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                            free_memory_mb = free_memory / (1024**2)
+                            logger.info(f"[REQUEST:{request_id}] Available GPU memory: {free_memory_mb:.2f}MB")
                     
                     # Check for image metadata
                     try:
